@@ -4,6 +4,8 @@ Self-hosted tool to **map your home-server topology** (which machine hosts which
 LXC / container / device) and **track which ports are used vs free** on each node —
 so you always know your layout and your attack surface.
 
+![Portico topology graph — hosts, guests, ports and typed dependency edges](docs/screenshot-graph.png)
+
 - 🗺️ Interactive topology graph (containment + typed dependency edges: proxy / mount / dns)
 - 🔌 Per-node port inventory with **free-port** and **free-IP** finders
 - 🌐 Networks / VLANs, exposure levels (`internal` / `lan` / `public`), duplicate-IP/MAC/port conflict detection
@@ -13,6 +15,10 @@ so you always know your layout and your attack surface.
 - 🔒 Single-password gate (read-only until you log in) · runs great in Docker
 
 Stack: Node + Express + SQLite (better-sqlite3), vanilla vis-network frontend. No cloud, no telemetry, works air-gapped.
+
+| Node inspector & per-node port map | Sortable table view |
+|:---:|:---:|
+| ![Node details, focus mode and port inventory](docs/screenshot-detail.png) | ![Sortable node table with exposure and status](docs/screenshot-table.png) |
 
 ---
 
