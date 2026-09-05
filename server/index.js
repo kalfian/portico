@@ -46,6 +46,8 @@ app.use('/api', require('./routes/nodes'));
 app.use('/api', require('./routes/ports'));
 app.use('/api', require('./routes/networks'));
 app.use('/api', require('./routes/links'));
+app.use('/api', require('./routes/probe'));
+app.use('/api', require('./routes/import'));
 app.use('/api', require('./routes/icons'));
 app.use('/api', require('./routes/data'));
 

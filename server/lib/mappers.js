@@ -21,6 +21,7 @@ function nodeToApi(row, tags = []) {
     notes: row.notes,
     posX: row.pos_x,
     posY: row.pos_y,
+    lastSeen: row.last_seen ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -40,6 +41,7 @@ function portToApi(row) {
     scheme: row.scheme,
     hostPort: row.host_port,
     targetNodeId: row.target_node_id,
+    lastSeen: row.last_seen ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

@@ -124,9 +124,9 @@ function resolveNodeFields(body, existing) {
 
 const insNode = db.prepare(`
   INSERT INTO nodes (id, name, type, parent_id, ip_address, mac_address, os, role, status,
-                     network_id, icon_type, icon_value, notes, pos_x, pos_y, created_at, updated_at)
+                     network_id, icon_type, icon_value, notes, pos_x, pos_y, last_seen, created_at, updated_at)
   VALUES (@id, @name, @type, @parent_id, @ip_address, @mac_address, @os, @role, @status,
-          @network_id, @icon_type, @icon_value, @notes, @pos_x, @pos_y, @created_at, @updated_at)
+          @network_id, @icon_type, @icon_value, @notes, @pos_x, @pos_y, @last_seen, @created_at, @updated_at)
 `);
 
 function createNode(body, providedId) {
@@ -145,7 +145,7 @@ function createNode(body, providedId) {
         ip_address: f.ipAddress || '', mac_address: f.macAddress || '', os: f.os || '',
         role: f.role || '', status: f.status, network_id: f.networkId || null,
         icon_type: f.iconType || '', icon_value: f.iconValue || '', notes: f.notes || '',
-        pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, created_at: ts, updated_at: ts,
+        pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, last_seen: null, created_at: ts, updated_at: ts,
       });
     } catch (err) { throw mapDbError(err); }
     setTagsForNode(id, f.tags || []);
@@ -257,9 +257,9 @@ function validatePortFields(f) {
 
 const insPort = db.prepare(`
   INSERT INTO ports (id, node_id, port_number, protocol, service_name, description, status,
-                     domain, exposure, scheme, host_port, target_node_id, created_at, updated_at)
+                     domain, exposure, scheme, host_port, target_node_id, last_seen, created_at, updated_at)
   VALUES (@id, @node_id, @port_number, @protocol, @service_name, @description, @status,
-          @domain, @exposure, @scheme, @host_port, @target_node_id, @created_at, @updated_at)
+          @domain, @exposure, @scheme, @host_port, @target_node_id, @last_seen, @created_at, @updated_at)
 `);
 
 function createPort(nodeId, body) {
@@ -274,7 +274,7 @@ function createPort(nodeId, body) {
       service_name: f.serviceName || '', description: f.description || '', status: f.status,
       domain: f.domain || '', exposure: f.exposure, scheme: f.scheme,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-      target_node_id: f.targetNodeId || null, created_at: ts, updated_at: ts,
+      target_node_id: f.targetNodeId || null, last_seen: null, created_at: ts, updated_at: ts,
     });
   } catch (err) { throw mapDbError(err); }
   return portToApi(getPortRow(id));
@@ -549,6 +549,7 @@ function importAll(data) {
         role: n.role || '', status, network_id: n.networkId || null, icon_type: iconType,
         icon_value: typeof n.iconValue === 'string' ? n.iconValue : '', notes: n.notes || '',
         pos_x: Number(n.posX) || 0, pos_y: Number(n.posY) || 0,
+        last_seen: n.lastSeen || null,
         created_at: n.createdAt || ts, updated_at: n.updatedAt || ts,
       });
       setTagsForNode(id, Array.isArray(n.tags) ? n.tags : []);
@@ -562,6 +563,7 @@ function importAll(data) {
         status: E.PORT_STATUS.includes(p.status) ? p.status : 'in_use',
         domain: f.domain, exposure: f.exposure, scheme: f.scheme,
         host_port: f.hostPort, target_node_id: p.targetNodeId || null,
+        last_seen: p.lastSeen || null,
         created_at: p.createdAt || ts, updated_at: p.updatedAt || ts,
       });
     }
@@ -598,6 +600,225 @@ function normalizeImportedPort(p) {
   return { exposure, domain, scheme, hostPort };
 }
 
+// ------------------------------------------------------------------ probe (health check)
+
+// Collect probe targets = { node (api shape), ports (api shape) } per node.
+// When nodeIds is provided, every id must exist (404 otherwise) so callers get a
+// clear error; when null, probe every node.
+function listProbeTargets({ nodeIds } = {}) {
+  let rows;
+  if (nodeIds && nodeIds.length) {
+    rows = [];
+    for (const id of nodeIds) {
+      const row = getNodeRow(id);
+      if (!row) throw new ApiError(404, `Node not found: ${id}`);
+      rows.push(row);
+    }
+  } else if (nodeIds && nodeIds.length === 0) {
+    rows = [];
+  } else {
+    rows = db.prepare('SELECT * FROM nodes ORDER BY created_at, rowid').all();
+  }
+  return rows.map((r) => ({
+    node: nodeToApi(r, getTagsForNode(r.id)),
+    ports: db.prepare('SELECT * FROM ports WHERE node_id = ? ORDER BY port_number, protocol').all(r.id).map(portToApi),
+  }));
+}
+
+const updNodeProbe = db.prepare('UPDATE nodes SET status=?, last_seen=COALESCE(?, last_seen), updated_at=? WHERE id=?');
+const updNodeProbeSeenOnly = db.prepare('UPDATE nodes SET last_seen=COALESCE(?, last_seen), updated_at=? WHERE id=?');
+const updPortSeen = db.prepare('UPDATE ports SET last_seen=?, updated_at=? WHERE id=?');
+
+// Persist a single node's probe outcome. Never touches port.status (in_use/
+// reserved) — only sets last_seen on reachable ports and the node's status/
+// last_seen. status 'unknown' leaves the node's stored status untouched (we
+// couldn't actually determine it), only its last_seen is preserved via COALESCE.
+function recordProbeResult({ nodeId, status, nodeLastSeen, openPortIds, portLastSeen }) {
+  const ts = now();
+  const run = db.transaction(() => {
+    if (status === 'up' || status === 'down') {
+      updNodeProbe.run(status, nodeLastSeen || null, ts, nodeId);
+    } else {
+      updNodeProbeSeenOnly.run(nodeLastSeen || null, ts, nodeId);
+    }
+    for (const pid of openPortIds || []) {
+      updPortSeen.run(portLastSeen, ts, pid);
+    }
+  });
+  run();
+  const row = getNodeRow(nodeId);
+  return { lastSeen: row ? row.last_seen ?? null : null };
+}
+
+// ------------------------------------------------------------------ import (parse → apply)
+
+// Apply a parsed/edited import payload additively (does NOT replace-all like
+// importAll). Everything happens in one transaction; de-dupes against existing
+// data and returns what was created vs skipped.
+//   payload = { nodes?, ports?, parentId?, networkId?, nodeId? }
+//   - node.ref     : correlates a payload node to its payload ports (nodeRef)
+//   - parentId     : default parent for created nodes lacking their own parentId
+//   - networkId    : default network for created nodes lacking their own networkId
+//   - nodeId       : default target node for ports lacking node association (ss)
+// Node dedupe: existing match by name (case-insensitive) OR non-empty ipAddress.
+// Port dedupe: existing (node_id, port_number, protocol) on the resolved node.
+function importParsed(payload = {}) {
+  const inNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+  const inPorts = Array.isArray(payload.ports) ? payload.ports : [];
+  const defParent = payload.parentId || null;
+  const defNetwork = payload.networkId || null;
+  const defNodeId = payload.nodeId || null;
+
+  if (defParent && !getNodeRow(defParent)) throw new ApiError(400, `parentId not found: ${defParent}`);
+  if (defNetwork && !getNetworkRow(defNetwork)) throw new ApiError(400, `networkId not found: ${defNetwork}`);
+  if (defNodeId && !getNodeRow(defNodeId)) throw new ApiError(400, `nodeId not found: ${defNodeId}`);
+
+  const result = {
+    nodes: { created: [], skipped: [] },
+    ports: { created: [], skipped: [] },
+  };
+
+  // Preload existing nodes for dedupe.
+  const existingNodes = db.prepare('SELECT id, name, ip_address FROM nodes').all();
+  const byName = new Map();
+  const byIp = new Map();
+  for (const r of existingNodes) {
+    byName.set(String(r.name).trim().toLowerCase(), r.id);
+    if (r.ip_address) byIp.set(r.ip_address, r.id);
+  }
+
+  const refToId = new Map(); // payload ref → resolved node id (created or matched)
+  const ts = now();
+
+  const run = db.transaction(() => {
+    // --- nodes ---
+    for (const n of inNodes) {
+      const ref = n.ref != null ? String(n.ref) : null;
+      const name = String(n.name || '').trim();
+      const ip = (n.ipAddress || '').trim();
+
+      // Dedupe: existing by ip first (more specific), then by name.
+      let matchId = null;
+      if (ip && byIp.has(ip)) matchId = byIp.get(ip);
+      else if (name && byName.has(name.toLowerCase())) matchId = byName.get(name.toLowerCase());
+
+      if (matchId) {
+        if (ref) refToId.set(ref, matchId);
+        result.nodes.skipped.push({ ref, name, reason: 'already exists', nodeId: matchId });
+        continue;
+      }
+
+      const body = {
+        name,
+        type: E.NODE_TYPES.includes(n.type) ? n.type : 'physical',
+        parentId: n.parentId || defParent || null,
+        ipAddress: ip,
+        macAddress: n.macAddress || '',
+        os: n.os || '',
+        role: n.role || '',
+        status: E.NODE_STATUS.includes(n.status) ? n.status : 'unknown',
+        networkId: n.networkId || defNetwork || null,
+        iconType: E.ICON_TYPES.includes(n.iconType) ? n.iconType : '',
+        iconValue: typeof n.iconValue === 'string' ? n.iconValue : '',
+        tags: Array.isArray(n.tags) ? n.tags : [],
+        notes: n.notes || '',
+      };
+      const f = resolveNodeFields(body, null);
+      try {
+        validateNodeFields(f);
+      } catch (err) {
+        result.nodes.skipped.push({ ref, name, reason: err.message });
+        continue;
+      }
+      const id = uid('n');
+      try {
+        insNode.run({
+          id, name: String(f.name).trim(), type: f.type, parent_id: f.parentId || null,
+          ip_address: f.ipAddress || '', mac_address: f.macAddress || '', os: f.os || '',
+          role: f.role || '', status: f.status, network_id: f.networkId || null,
+          icon_type: f.iconType || '', icon_value: f.iconValue || '', notes: f.notes || '',
+          pos_x: 0, pos_y: 0, last_seen: null, created_at: ts, updated_at: ts,
+        });
+        setTagsForNode(id, f.tags || []);
+      } catch (err) {
+        result.nodes.skipped.push({ ref, name, reason: (mapDbError(err) || err).message });
+        continue;
+      }
+      // Register for later dedupe within the same batch + ref resolution.
+      if (ref) refToId.set(ref, id);
+      if (name) byName.set(name.toLowerCase(), id);
+      if (f.ipAddress) byIp.set(f.ipAddress, id);
+      result.nodes.created.push({ id, name, ref });
+    }
+
+    // --- ports ---
+    for (const p of inPorts) {
+      // Resolve target node: explicit nodeId → payload ref → default nodeId.
+      let targetNode = null;
+      if (p.nodeId && getNodeRow(p.nodeId)) targetNode = p.nodeId;
+      else if (p.nodeRef != null && refToId.has(String(p.nodeRef))) targetNode = refToId.get(String(p.nodeRef));
+      else if (defNodeId) targetNode = defNodeId;
+
+      const portNumber = Number(p.portNumber);
+      if (!targetNode) {
+        result.ports.skipped.push({ portNumber: p.portNumber, protocol: p.protocol, reason: 'no target node (set nodeId, nodeRef, or top-level nodeId)' });
+        continue;
+      }
+      // Parsed ports carry no status; default to in_use. Only pass keys that are
+      // actually present so resolvePortFields applies its own defaults otherwise.
+      const portBody = {
+        portNumber,
+        protocol: E.PORT_PROTOCOLS.includes(p.protocol) ? p.protocol : 'tcp',
+        status: E.PORT_STATUS.includes(p.status) ? p.status : 'in_use',
+      };
+      if (p.serviceName !== undefined) portBody.serviceName = p.serviceName;
+      if (p.description !== undefined) portBody.description = p.description;
+      if (p.domain !== undefined) portBody.domain = p.domain;
+      if (p.exposure !== undefined) portBody.exposure = p.exposure;
+      if (p.scheme !== undefined) portBody.scheme = p.scheme;
+      if (p.hostPort !== undefined) portBody.hostPort = p.hostPort;
+      if (p.targetNodeId !== undefined) portBody.targetNodeId = p.targetNodeId;
+      const f = resolvePortFields(portBody, null);
+      try {
+        validatePortFields(f);
+      } catch (err) {
+        result.ports.skipped.push({ nodeId: targetNode, portNumber: p.portNumber, protocol: p.protocol, reason: err.message });
+        continue;
+      }
+      // Dedupe against existing (node, port, protocol).
+      const dup = db.prepare('SELECT id FROM ports WHERE node_id=? AND port_number=? AND protocol=?')
+        .get(targetNode, Number(f.portNumber), f.protocol);
+      if (dup) {
+        result.ports.skipped.push({ nodeId: targetNode, portNumber: Number(f.portNumber), protocol: f.protocol, reason: 'already exists', portId: dup.id });
+        continue;
+      }
+      const id = uid('p');
+      try {
+        insPort.run({
+          id, node_id: targetNode, port_number: Number(f.portNumber), protocol: f.protocol,
+          service_name: f.serviceName || '', description: f.description || '', status: f.status,
+          domain: f.domain || '', exposure: f.exposure, scheme: f.scheme,
+          host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
+          target_node_id: f.targetNodeId || null, last_seen: null, created_at: ts, updated_at: ts,
+        });
+      } catch (err) {
+        result.ports.skipped.push({ nodeId: targetNode, portNumber: Number(f.portNumber), protocol: f.protocol, reason: (mapDbError(err) || err).message });
+        continue;
+      }
+      result.ports.created.push({ id, nodeId: targetNode, portNumber: Number(f.portNumber), protocol: f.protocol });
+    }
+  });
+
+  try { run(); } catch (err) { throw mapDbError(err); }
+
+  return {
+    created: { nodes: result.nodes.created.length, ports: result.ports.created.length },
+    skipped: { nodes: result.nodes.skipped.length, ports: result.ports.skipped.length },
+    nodes: result.nodes,
+    ports: result.ports,
+  };
+}
+
 module.exports = {
   // nodes
   listNodes, getNode, createNode, updateNode, deleteNode,
@@ -609,4 +830,8 @@ module.exports = {
   listLinks, createLink, updateLink, deleteLink,
   // aggregate
   getTopology, exportAll, importAll, isEmpty,
+  // probe (health check)
+  listProbeTargets, recordProbeResult,
+  // import (parse → apply)
+  importParsed,
 };

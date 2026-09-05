@@ -48,6 +48,7 @@ function buildLlmContext() {
     const net = n.networkId && netById.has(n.networkId) ? netById.get(n.networkId).name : null;
     const bits = [n.type, n.ipAddress || 'no-ip', `status:${n.status}`];
     if (net) bits.push(`net:${net}`);
+    if (n.lastSeen) bits.push(`seen:${n.lastSeen}`);
     lines.push(`${indent}- **${n.name}** (${bits.join(', ')})`);
 
     const np = (portsByNode.get(n.id) || []).slice().sort((a, b) => a.portNumber - b.portNumber);

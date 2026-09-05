@@ -23,6 +23,7 @@ db.pragma('foreign_keys = ON');
 const MIGRATIONS = [
   { version: 1, file: '001_init.sql' },
   { version: 2, file: '002_tokens.sql' },
+  { version: 3, file: '003_last_seen.sql' },
 ];
 
 function runMigrations() {
