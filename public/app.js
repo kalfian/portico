@@ -54,6 +54,12 @@ const api = {
   listTokens: () => apiFetch('/api/tokens'),
   createToken: (name, scope) => apiFetch('/api/tokens', { method: 'POST', body: JSON.stringify({ name, scope }) }),
   revokeToken: (id) => apiFetch('/api/tokens/' + enc(id), { method: 'DELETE' }),
+  // health check (probe): sets node.status + last_seen, never port.status
+  probeAll: (nodeIds) => apiFetch('/api/probe', { method: 'POST', body: JSON.stringify(nodeIds && nodeIds.length ? { nodeIds } : {}) }),
+  probeNode: (id) => apiFetch('/api/nodes/' + enc(id) + '/probe', { method: 'POST', body: JSON.stringify({}) }),
+  // import from source: parse (dry-run) → apply (additive, de-duped)
+  importParse: (source, text) => apiFetch('/api/import/parse', { method: 'POST', body: JSON.stringify({ source, text }) }),
+  importApply: (payload) => apiFetch('/api/import/apply', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 /* ================= AUTH (server session) =================
@@ -330,6 +336,14 @@ let selectedId = null;
 let portFilter = { proto: 'all', q: '' };
 let freeRange = { from: 8000, to: 9000, proto: 'tcp' };
 
+/* view + node-table UI prefs (persisted like the other localStorage prefs) */
+let currentView = (localStorage.getItem('hst-view') === 'table') ? 'table' : 'graph';
+let tableQ = '';
+let tableSort = (() => {
+  try { const s = JSON.parse(localStorage.getItem('hst-table-sort') || ''); if (s && s.key) return { key: s.key, dir: s.dir === 'desc' ? 'desc' : 'asc' }; } catch (e) {}
+  return { key: 'name', dir: 'asc' };
+})();
+
 /* replace-in-place helpers for surgical local state updates after a mutation */
 function replaceNode(n) { const i = state.nodes.findIndex(x => x.id === n.id); if (i >= 0) state.nodes[i] = n; else state.nodes.push(n); }
 function replacePort(p) { const i = state.ports.findIndex(x => x.id === p.id); if (i >= 0) state.ports[i] = p; else state.ports.push(p); }
@@ -484,7 +498,7 @@ function buildGraph() {
   network.on('afterDrawing', (ctx) => drawFlow(ctx));
   network.on('click', (params) => {
     if (params.nodes.length) select(params.nodes[0]);
-    else { selectedId = null; focusSet = null; network.unselectAll(); syncGraph(); closeSidebar(); renderDetail(); }
+    else { selectedId = null; focusSet = null; network.unselectAll(); syncGraph(); closeSidebar(); renderDetail(); markTableSelection(); }
   });
   network.on('dragEnd', (params) => {
     if (!canEdit()) return;   // read-only: don't persist positions (dragNodes is also disabled)
@@ -670,10 +684,11 @@ function select(id) {
   focusSet = relatedIds(id);
   syncGraph();
   openSidebar();
-  if (network && !REDUCE) {
+  if (network && !REDUCE && currentView !== 'table') {
     network.focus(id, { scale: network.getScale(), animation: { duration: 420, easingFunction: 'easeInOutCubic' } });
   }
   renderDetail();
+  markTableSelection();
   startFlow();
 }
 function clearFocus() { if (focusSet) { focusSet = null; syncGraph(); } }
@@ -712,12 +727,191 @@ function renderWarnings() {
   const count = _conflicts.length;
   btn.classList.toggle('has', count > 0);
   btn.querySelector('.warn-count').textContent = count;
-  btn.title = count ? `${count} conflict${count > 1 ? 's' : ''} detected — click to review` : 'No conflicts detected';
+  if (!count) { btn.title = 'No conflicts detected'; btn.setAttribute('aria-label', 'Conflicts: none'); return; }
+  const by = { ip: 0, mac: 0, hostPort: 0 };
+  _conflicts.forEach(c => { by[c.kind] = (by[c.kind] || 0) + 1; });
+  const parts = KIND_ORDER.filter(k => by[k]).map(k => `${by[k]} ${CONFLICT_KINDS[k].short}`);
+  const summary = `${count} conflict${count > 1 ? 's' : ''} — ${parts.join(' · ')} (click to review)`;
+  btn.title = summary;
+  btn.setAttribute('aria-label', summary);
 }
 function toggleCanvasEmpty() { document.getElementById('canvasEmpty').style.display = state.nodes.length ? 'none' : 'flex'; }
-function refreshChrome() { refreshConflicts(); renderLayers(); renderStats(); renderWarnings(); toggleCanvasEmpty(); startFlow(); }
+function refreshChrome() { refreshConflicts(); renderLayers(); renderStats(); renderWarnings(); toggleCanvasEmpty(); refreshTable(); startFlow(); }
+
+/* ================= NODE TABLE VIEW ================= */
+/* exposure ranking: highest wins (public > lan > internal); 0 = no ports */
+const EXP_RANK = { internal: 1, lan: 2, public: 3 };
+const STATUS_RANK = { up: 0, unknown: 1, down: 2 };
+function nodePortStats(id) {
+  let inUse = 0, total = 0, expRank = 0;
+  for (const p of state.ports) {
+    if (p.nodeId !== id) continue;
+    total++;
+    if (p.status === 'in_use') inUse++;
+    const r = EXP_RANK[p.exposure] || 0;
+    if (r > expRank) expRank = r;
+  }
+  return { inUse, total, expRank };
+}
+function setView(v, opts = {}) {
+  v = v === 'table' ? 'table' : 'graph';
+  currentView = v;
+  if (!opts.silent) localStorage.setItem('hst-view', v);
+  const isTable = v === 'table';
+  document.querySelectorAll('#viewToggle [data-view]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.view === v)));
+  const graphWrap = document.querySelector('.graph-wrap');
+  const tableView = document.getElementById('tableView');
+  if (graphWrap) graphWrap.hidden = isTable;
+  if (tableView) tableView.hidden = !isTable;
+  document.body.classList.toggle('view-table', isTable);
+  if (isTable) renderTable();
+  else if (network) { reflowGraph(); }   // graph was 0-sized while hidden — re-measure + redraw
+}
+/* comparator for the active sort column */
+function nodeSortValue(n, key) {
+  switch (key) {
+    case 'name': return (n.name || '').toLowerCase();
+    case 'type': { const i = TYPE_ORDER.indexOf(n.type); return i < 0 ? 99 : i; }
+    case 'ip': { const v = ipToInt(n.ipAddress); return v == null ? Infinity : v; }
+    case 'network': { const nw = n.networkId ? nwById(n.networkId) : null; return nw ? nw.name.toLowerCase() : '￿'; }
+    case 'ports': return nodePortStats(n.id).inUse;
+    case 'exposure': return nodePortStats(n.id).expRank;
+    case 'status': return STATUS_RANK[n.status] ?? 1;
+    default: return 0;
+  }
+}
+function filteredSortedNodes() {
+  const q = tableQ.trim().toLowerCase();
+  let rows = state.nodes;
+  if (q) {
+    rows = rows.filter(n => {
+      const nw = n.networkId ? nwById(n.networkId) : null;
+      const hay = [n.name, n.ipAddress, n.macAddress, n.os, n.role, (TYPES[n.type] || {}).label, nw ? nw.name : '', (n.tags || []).join(' ')].join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }
+  const { key, dir } = tableSort;
+  const sign = dir === 'desc' ? -1 : 1;
+  rows = rows.slice().sort((a, b) => {
+    const va = nodeSortValue(a, key), vb = nodeSortValue(b, key);
+    let c;
+    if (typeof va === 'string' || typeof vb === 'string') c = String(va).localeCompare(String(vb));
+    else c = va < vb ? -1 : va > vb ? 1 : 0;
+    if (c === 0 && key !== 'name') c = (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase());
+    return c * sign;
+  });
+  return rows;
+}
+function tableRowHtml(n) {
+  const t = TYPES[n.type] || { label: n.type, color: '#7c8aa0' };
+  const nw = n.networkId ? nwById(n.networkId) : null;
+  const st = nodePortStats(n.id);
+  const ip = (n.ipAddress || '').trim();
+  const sc = ['up', 'down', 'unknown'].includes(n.status) ? n.status : 'unknown';
+  const src = nodeImageSrc(n);
+  const hasConf = nodeConflicts(n.id).length > 0;
+  const expTag = st.expRank
+    ? (() => { const key = st.expRank === 3 ? 'public' : st.expRank === 2 ? 'lan' : 'internal'; const e = EXPOSURE[key]; return `<span class="tag ${e.cls}" title="${esc(e.tip)}">${e.label}</span>`; })()
+    : '<span class="muted">—</span>';
+  const cls = [hasConf ? 'row-warn' : '', selectedId === n.id ? 'is-selected' : ''].filter(Boolean).join(' ');
+  return `<tr data-id="${n.id}" tabindex="0" role="button" aria-label="Open ${esc(n.name)}"${cls ? ` class="${cls}"` : ''}>
+    <td><div class="ncell-name">
+      ${src ? `<span class="tv-avatar"><img src="${esc(src)}" alt="" onerror="this.closest('.tv-avatar').style.display='none'"></span>` : ''}
+      <span class="tv-name">${esc(n.name)}</span>
+      ${hasConf ? `<span class="tv-warn" title="This node has a conflict">${WARN_ICON}</span>` : ''}
+    </div></td>
+    <td><span class="tv-type" style="color:${t.color}"><span class="cmd__dot" style="background:${t.color}"></span>${esc(t.label)}</span></td>
+    <td>${ip ? `<span class="tv-mono">${esc(ip)}</span>` : '<span class="muted">—</span>'}</td>
+    <td>${nw ? `<span class="tv-net"><span class="cmd__dot" style="background:${nw.color}"></span>${esc(nw.name)}</span>` : '<span class="muted">—</span>'}</td>
+    <td class="tnum">${st.inUse}<span class="muted">/${st.total}</span></td>
+    <td>${expTag}</td>
+    <td><span class="badge badge--${sc}"><span class="dot"></span>${esc(n.status)}</span>${(() => { const r = relativeShort(n.lastSeen); return r ? `<span class="tv-seen" title="Last seen ${esc(absTime(n.lastSeen))}">${esc(r)}</span>` : ''; })()}</td>
+  </tr>`;
+}
+function renderTableRows() {
+  const body = document.getElementById('tableBody');
+  const emptyEl = document.getElementById('tableEmpty');
+  const countEl = document.getElementById('tableCount');
+  if (!body) return;
+  const rows = filteredSortedNodes();
+  const total = state.nodes.length;
+  body.innerHTML = rows.map(tableRowHtml).join('');
+  const tableEl = document.querySelector('#tableView table.ntable');
+  if (tableEl) tableEl.style.display = rows.length ? '' : 'none';
+  // empty states
+  if (emptyEl) {
+    if (!total) {
+      emptyEl.hidden = false;
+      emptyEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9.5" x2="21" y2="9.5"/><line x1="9" y1="9.5" x2="9" y2="20"/></svg>
+        <h3>No nodes yet</h3><p>Add your first machine to start mapping the topology.</p>
+        ${canEdit() ? `<button class="btn btn--primary btn--sm" onclick="openNodeModal()">Add node</button>` : ''}`;
+    } else if (!rows.length) {
+      emptyEl.hidden = false;
+      emptyEl.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
+        <h3>No matches</h3><p>No nodes match “${esc(tableQ.trim())}”.</p>`;
+    } else {
+      emptyEl.hidden = true;
+    }
+  }
+  if (countEl) countEl.textContent = (rows.length === total) ? `${total} node${total !== 1 ? 's' : ''}` : `${rows.length} of ${total}`;
+}
+function updateSortIndicators() {
+  document.querySelectorAll('#tableView thead th[data-sort]').forEach(th => {
+    if (th.dataset.sort === tableSort.key) th.setAttribute('aria-sort', tableSort.dir === 'desc' ? 'descending' : 'ascending');
+    else th.removeAttribute('aria-sort');
+  });
+}
+function renderTable() { updateSortIndicators(); renderTableRows(); }
+/* keep the table synced with mutations without clobbering the filter input focus */
+function refreshTable() { if (currentView === 'table') renderTable(); }
+/* highlight the selected row without a full rebuild (used on select/deselect) */
+function markTableSelection() {
+  const body = document.getElementById('tableBody');
+  if (!body) return;
+  body.querySelectorAll('tr').forEach(tr => {
+    const on = tr.dataset.id === selectedId;
+    tr.classList.toggle('is-selected', on);
+    if (on && currentView === 'table') tr.scrollIntoView({ block: 'nearest', behavior: REDUCE ? 'auto' : 'smooth' });
+  });
+}
 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ---- relative "last seen" helpers (probe freshness) ---- */
+function _ageMs(iso) { if (!iso) return null; const t = new Date(iso).getTime(); return Number.isFinite(t) ? Date.now() - t : null; }
+function relativeTime(iso) {   // long form for the detail panel
+  const d = _ageMs(iso); if (d == null) return null;
+  const s = Math.max(0, Math.round(d / 1000)); if (s < 45) return 'just now';
+  const m = Math.round(s / 60); if (m < 60) return m + 'm ago';
+  const h = Math.round(m / 60); if (h < 24) return h + 'h ago';
+  const dy = Math.round(h / 24); if (dy < 30) return dy + 'd ago';
+  const mo = Math.round(dy / 30); if (mo < 12) return mo + 'mo ago';
+  return Math.round(mo / 12) + 'y ago';
+}
+function relativeShort(iso) {  // compact form for the table status column
+  const d = _ageMs(iso); if (d == null) return null;
+  const s = Math.max(0, Math.round(d / 1000)); if (s < 60) return 'now';
+  const m = Math.round(s / 60); if (m < 60) return m + 'm';
+  const h = Math.round(m / 60); if (h < 24) return h + 'h';
+  const dy = Math.round(h / 24); if (dy < 30) return dy + 'd';
+  const mo = Math.round(dy / 30); if (mo < 12) return mo + 'mo';
+  return Math.round(mo / 12) + 'y';
+}
+function absTime(iso) { const t = iso ? new Date(iso) : null; return (t && Number.isFinite(t.getTime())) ? t.toLocaleString() : ''; }
+function freshnessClass(iso) { const d = _ageMs(iso); if (d == null) return 'seen-dot--old'; if (d < 10 * 60 * 1000) return 'seen-dot--fresh'; if (d < 24 * 60 * 60 * 1000) return 'seen-dot--stale'; return 'seen-dot--old'; }
+
+/* ---- inline button spinner (async in-progress state) ---- */
+function withSpinner(btn, label) {
+  if (!btn) return;
+  if (btn._orig == null) btn._orig = btn.innerHTML;
+  btn.disabled = true; btn.setAttribute('aria-busy', 'true');
+  btn.innerHTML = '<span class="spinner" aria-hidden="true"></span>' + (label ? `<span class="lbl">${esc(label)}</span>` : '');
+}
+function clearSpinner(btn) {
+  if (!btn) return;
+  if (btn._orig != null) { btn.innerHTML = btn._orig; btn._orig = null; }
+  btn.disabled = false; btn.removeAttribute('aria-busy');
+}
 
 function renderDetail() {
   const el = document.getElementById('detail');
@@ -748,7 +942,8 @@ function renderDetail() {
           <span class="node-type-chip" style="color:${t.color}"><span class="dot"></span>${esc(t.label)}</span>
         </div>
         <div class="node-head__actions">
-          ${canEdit() ? `<button class="btn btn--ghost btn--icon" title="Edit node" onclick="openNodeModal('${n.id}')" aria-label="Edit node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
+          ${canEdit() ? `<button class="btn btn--ghost btn--icon" title="Check this node's health" onclick="runProbeNode('${n.id}', this)" aria-label="Check health of ${esc(n.name)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg></button>
+          <button class="btn btn--ghost btn--icon" title="Edit node" onclick="openNodeModal('${n.id}')" aria-label="Edit node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
           <button class="btn btn--ghost btn--icon btn--danger" title="Delete node" onclick="confirmDeleteNode('${n.id}')" aria-label="Delete node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6"/></svg></button>` : ''}
         </div>
       </div>
@@ -781,6 +976,7 @@ function renderDetail() {
         <dt>OS</dt><dd class="${n.os?'':'muted'}">${esc(n.os) || '—'}</dd>
         <dt>Parent</dt><dd>${parent ? `<button class="copy" data-goto="${parent.id}">${esc(parent.name)}</button>` : '<span class="muted">— root</span>'}</dd>
         ${kids.length ? `<dt>Children</dt><dd>${kids.map(k=>`<button class="copy" data-goto="${k.id}">${esc(k.name)}</button>`).join(', ')}</dd>` : ''}
+        <dt>Last seen</dt><dd class="${relativeTime(n.lastSeen) ? '' : 'muted'}">${(() => { const rel = relativeTime(n.lastSeen); return rel ? `<span class="seen-dot ${freshnessClass(n.lastSeen)}"></span>${esc(rel)}<span class="seen-abs"> · ${esc(absTime(n.lastSeen))}</span>` : 'never probed'; })()}</dd>
       </dl>
       ${n.notes ? `<div class="notes">${esc(n.notes)}</div>` : ''}
     </div>
@@ -1714,6 +1910,16 @@ const EDIT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 const TRASH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6"/></svg>';
 const PLUS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
 const IP_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>';
+const MAC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>';
+const PORT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h11"/><path d="m10 8 4 4-4 4"/><rect x="17" y="4" width="4" height="16" rx="1"/></svg>';
+
+/* conflict category metadata: title + icon + why-it-matters (single source for badge + modal) */
+const CONFLICT_KINDS = {
+  ip:       { title: 'Duplicate IP',        short: 'IP',   icon: IP_ICON,   why: 'Two or more nodes claim the same IP address. Only one can answer on the network — the others go unreachable or respond intermittently.' },
+  mac:      { title: 'Duplicate MAC',       short: 'MAC',  icon: MAC_ICON,  why: 'The same MAC appears on more than one node. A switch expects each MAC on a single port; duplicates cause flapping and dropped frames (often a cloned VM or a copy-paste slip).' },
+  hostPort: { title: 'Duplicate host port', short: 'port', icon: PORT_ICON, why: 'The same published host port is bound more than once on one host. Only the first binding wins; the rest fail to start with “address already in use”.' },
+};
+const KIND_ORDER = ['ip', 'mac', 'hostPort'];
 
 /* ================= EXPOSURE SURFACE ================= */
 function openExposureModal() {
@@ -1750,16 +1956,39 @@ function openExposureModal() {
 }
 
 /* ================= CONFLICTS ================= */
+/* value line for a single conflict, per kind (mono, host named for port clashes) */
+function conflictValueHtml(c) {
+  if (c.kind === 'hostPort') {
+    const host = nodeById(c.hostId);
+    return `<span class="conflict__val">:${esc(c.value)}${host ? ` on <b>${esc(host.name)}</b>` : ''}</span>`;
+  }
+  return `<span class="conflict__val">${esc(c.value)}</span>`;
+}
 function openConflictsModal() {
   refreshConflicts();
-  const body = _conflicts.length ? _conflicts.map(c => {
-    const names = c.nodeIds.map(id => nodeById(id)).filter(Boolean);
-    const chips = names.map(nn => `<button class="conflict__node" data-goto="${nn.id}"><span class="cmd__dot" style="background:${(TYPES[nn.type] || {}).color}"></span>${esc(nn.name)}</button>`).join('');
-    return `<div class="conflict">
-      <div class="conflict__head">${WARN_ICON}<span>${esc(conflictLabel(c))}</span></div>
-      <div class="conflict__nodes">${chips}</div>
-    </div>`;
-  }).join('') : `<div class="ports-empty" style="margin:0"><p>No conflicts — no duplicate IP or MAC, and no clashing published host ports.</p></div>`;
+  let body;
+  if (!_conflicts.length) {
+    body = `<div class="ports-empty" style="margin:0"><p>No conflicts — no duplicate IP or MAC, and no clashing published host ports.</p></div>`;
+  } else {
+    body = `<p class="confirm-text" style="margin-top:0">These overlaps cause real connectivity or start-up failures. Click any node to jump to it and fix the clash.</p>`;
+    body += KIND_ORDER.filter(k => _conflicts.some(c => c.kind === k)).map(k => {
+      const meta = CONFLICT_KINDS[k];
+      const items = _conflicts.filter(c => c.kind === k);
+      const cards = items.map(c => {
+        const names = (c.nodeIds || []).map(id => nodeById(id)).filter(Boolean);
+        const chips = names.map(nn => `<button class="conflict__node" data-goto="${nn.id}"><span class="cmd__dot" style="background:${(TYPES[nn.type] || {}).color}"></span>${esc(nn.name)}</button>`).join('');
+        return `<div class="conflict">
+          <div class="conflict__head">${conflictValueHtml(c)}</div>
+          <div class="conflict__nodes">${chips}</div>
+        </div>`;
+      }).join('');
+      return `<section class="cfl-group">
+        <div class="cfl-group__head">${meta.icon}<h4>${meta.title}</h4><span class="cfl-group__count">${items.length}</span></div>
+        <p class="cfl-group__why">${meta.why}</p>
+        ${cards}
+      </section>`;
+    }).join('');
+  }
   openModal(`
     <div class="modal__head"><h3 id="modalTitle">Conflicts${_conflicts.length ? ` <span class="badge badge--warn" style="vertical-align:middle">${_conflicts.length}</span>` : ''}</h3>
       <button class="btn btn--ghost btn--icon" onclick="closeModal()" aria-label="Close">${CLOSE_ICON}</button>
@@ -2110,7 +2339,40 @@ if (window.matchMedia && window.matchMedia('(max-width: 640px)').matches) {
   document.getElementById('layersToggle').setAttribute('aria-expanded', 'false');
 }
 
+/* ================= VIEW TOGGLE + NODE TABLE WIRING ================= */
+document.getElementById('viewToggle').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-view]'); if (!b) return;
+  setView(b.dataset.view);
+});
+(() => {
+  const filter = document.getElementById('tableFilter');
+  if (filter) {
+    filter.value = tableQ;
+    filter.addEventListener('input', (e) => { tableQ = e.target.value; renderTableRows(); });
+  }
+  document.querySelectorAll('#tableView thead th[data-sort] .th-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.closest('th').dataset.sort;
+      if (tableSort.key === key) tableSort.dir = tableSort.dir === 'asc' ? 'desc' : 'asc';
+      else tableSort = { key, dir: 'asc' };
+      try { localStorage.setItem('hst-table-sort', JSON.stringify(tableSort)); } catch (e) {}
+      renderTable();
+    });
+  });
+  const body = document.getElementById('tableBody');
+  if (body) {
+    const activate = (tr) => { const id = tr.dataset.id; if (id) select(id); };
+    body.addEventListener('click', (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) activate(tr); });
+    body.addEventListener('keydown', (e) => {
+      const tr = e.target.closest('tr[data-id]'); if (!tr) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(tr); }
+    });
+  }
+})();
+
 /* ================= WIRE TOOLBAR + CANVAS CONTROLS ================= */
+document.getElementById('btnProbe').addEventListener('click', (e) => runProbeAll(e.currentTarget));
+document.getElementById('btnImportSource').addEventListener('click', openImportModal);
 document.getElementById('btnAddNode').addEventListener('click', () => openNodeModal());
 document.getElementById('btnArrange').addEventListener('click', autoArrange);
 document.getElementById('btnFit').addEventListener('click', () => network.fit({ animation: REDUCE ? false : { duration: 420, easingFunction: 'easeInOutCubic' } }));
@@ -2137,6 +2399,227 @@ window.openAuthModal = openAuthModal;
 window.openNetworksModal = openNetworksModal;
 window.openLinksModal = openLinksModal;
 
+/* ================= HEALTH CHECK (probe) ================= */
+/* Probe-all: TCP-connects every node's ports, refreshes status + last_seen. */
+async function runProbeAll(btn) {
+  if (!requireEdit()) return;
+  withSpinner(btn, 'Checking…');
+  try {
+    const s = await api.probeAll();
+    await reloadState();
+    syncGraph(); refreshChrome(); renderDetail();
+    toast(`${s.up} up · ${s.down} down · ${s.unknown} unknown`, 'ok');
+  } catch (e) {
+    toast(e.message, 'err');
+  } finally {
+    clearSpinner(btn);
+  }
+}
+/* Per-node probe (from the detail sidebar). renderDetail rebuilds the button on
+   success, so we only restore it on failure. */
+async function runProbeNode(id, btn) {
+  if (!requireEdit()) return;
+  withSpinner(btn);
+  try {
+    const s = await api.probeNode(id);
+    await reloadState();
+    syncGraph(); refreshChrome(); renderDetail();
+    const r = s.results && s.results[0];
+    if (r) {
+      const detail = r.status === 'unknown' ? 'nothing probeable (no IP or TCP ports)' : `${r.openPorts}/${r.probeablePorts} port${r.probeablePorts !== 1 ? 's' : ''} open`;
+      toast(`${r.name} · ${r.status} — ${detail}`, 'ok');
+    } else {
+      toast('Probe complete', 'ok');
+    }
+  } catch (e) {
+    clearSpinner(btn);
+    toast(e.message, 'err');
+  }
+}
+window.runProbeNode = runProbeNode;
+
+/* ================= IMPORT FROM SOURCE (parse → preview → apply) ================= */
+const IMPORT_SOURCES = {
+  docker_ps: { label: 'Docker',  hint: 'Output from a Docker host — running containers become nodes, published ports become ports.', cmd: "docker ps   ·   or   docker ps --format '{{json .}}'", kind: 'nodes' },
+  ss:        { label: 'ss',      hint: 'Listening sockets from a Linux host — each becomes a port on the node you pick below.',       cmd: 'ss -tlnp   ·   or   ss -tulpn', kind: 'ports' },
+  proxmox:   { label: 'Proxmox', hint: 'VM + container inventory from a Proxmox host — each becomes a node.',                          cmd: 'qm list   ·   and   pct list', kind: 'nodes' },
+  nmap:      { label: 'nmap',    hint: 'nmap XML scan (paste or load a file) — discovered hosts become nodes, open ports become ports.', cmd: 'nmap -oX - <target>', kind: 'nodes' },
+};
+const IMPORT_ORDER = ['docker_ps', 'ss', 'proxmox', 'nmap'];
+let importWiz = null;
+
+function openImportModal() {
+  if (!requireEdit()) return;
+  menuOverlay.classList.remove('open');
+  importWiz = { step: 1, source: 'docker_ps', text: '', nodeId: (selectedId || ''), parentId: '', networkId: '', parsed: null };
+  openModal(`
+    <div class="modal__head">
+      <h3 id="modalTitle">Import from source</h3>
+      <div class="import-steps" id="importSteps" aria-hidden="true"></div>
+      <button class="btn btn--ghost btn--icon" onclick="closeModal()" aria-label="Close">${CLOSE_ICON}</button>
+    </div>
+    <div class="modal__body" id="importBody"></div>
+    <div class="modal__foot" id="importFoot"></div>`);
+  renderImportStep();
+  setTimeout(() => { const t = document.getElementById('importText'); if (t) t.focus(); }, 60);
+}
+function captureImportStep1() {
+  const t = document.getElementById('importText'); if (t) importWiz.text = t.value;
+  const nd = document.getElementById('importNode'); if (nd) importWiz.nodeId = nd.value;
+  const pr = document.getElementById('importParent'); if (pr) importWiz.parentId = pr.value;
+  const nt = document.getElementById('importNet'); if (nt) importWiz.networkId = nt.value;
+}
+function renderImportStep() {
+  const steps = document.getElementById('importSteps');
+  if (steps) steps.innerHTML = `
+    <span class="import-steps__item ${importWiz.step === 1 ? 'is-active' : 'is-done'}"><span class="import-steps__num">${importWiz.step > 1 ? '✓' : '1'}</span>Source</span>
+    <span class="import-steps__sep"></span>
+    <span class="import-steps__item ${importWiz.step === 2 ? 'is-active' : ''}"><span class="import-steps__num">2</span>Preview</span>`;
+  const body = document.getElementById('importBody');
+  const foot = document.getElementById('importFoot');
+  if (importWiz.step === 1) renderImportStep1(body, foot);
+  else renderImportStep2(body, foot);
+}
+function renderImportStep1(body, foot) {
+  const s = IMPORT_SOURCES[importWiz.source];
+  const isSs = importWiz.source === 'ss';
+  const nodeOpts = state.nodes.map(nn => `<option value="${nn.id}" ${importWiz.nodeId === nn.id ? 'selected' : ''}>${esc(nn.name)} · ${TYPES[nn.type].label}</option>`).join('');
+  const parentOpts = ['<option value="">— none (root)</option>'].concat(state.nodes.map(nn => `<option value="${nn.id}" ${importWiz.parentId === nn.id ? 'selected' : ''}>${esc(nn.name)} · ${TYPES[nn.type].label}</option>`)).join('');
+  const netOpts = ['<option value="">— none</option>'].concat(state.networks.map(w => `<option value="${w.id}" ${importWiz.networkId === w.id ? 'selected' : ''}>${esc(w.name)}${w.vlanId != null ? ` · vlan ${w.vlanId}` : ''} · ${esc(w.cidr)}</option>`)).join('');
+  body.innerHTML = `
+    <div class="form-field full">
+      <label id="importSrcLabel">Source</label>
+      <div class="seg" id="importSrc" role="group" aria-labelledby="importSrcLabel">
+        ${IMPORT_ORDER.map(k => `<button type="button" data-src="${k}" aria-pressed="${importWiz.source === k}">${IMPORT_SOURCES[k].label}</button>`).join('')}
+      </div>
+      <div class="hint">${esc(s.hint)}</div>
+      <div class="import-cmd"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg><span>${esc(s.cmd)}</span></div>
+    </div>
+    <div class="form-field full">
+      <label for="importText">Paste output <span class="req">*</span></label>
+      <textarea class="input import-text" id="importText" placeholder="Paste the raw command output here…" spellcheck="false" autocapitalize="off" autocorrect="off" aria-describedby="importFileHint">${esc(importWiz.text)}</textarea>
+      <div class="import-file">
+        <input type="file" id="importFile" accept=".txt,.xml,.json,text/*,application/xml" class="sr-only">
+        <label for="importFile" class="btn btn--sm">Load file…</label>
+        <span class="hint" id="importFileHint">${isSs ? 'Reads a text dump into the box.' : (importWiz.source === 'nmap' ? 'nmap -oX XML, or any text dump.' : 'Reads a text / XML / JSON file into the box.')}</span>
+      </div>
+    </div>
+    ${isSs ? `
+    <div class="form-field full">
+      <label for="importNode">Attach ports to node <span class="req">*</span></label>
+      ${state.nodes.length ? `<select class="input" id="importNode">${nodeOpts}</select>` : `<div class="warn-box">Add a node first — <span class="mono">ss</span> ports need a node to attach to.</div>`}
+      <div class="hint"><span class="mono">ss</span> lists sockets without a host — pick which node these ports belong to.</div>
+    </div>` : `
+    <div class="form-grid">
+      <div class="form-field"><label for="importParent">Parent node</label><select class="input" id="importParent">${parentOpts}</select><div class="hint">Optional default parent for new nodes.</div></div>
+      <div class="form-field"><label for="importNet">Network</label><select class="input" id="importNet">${netOpts}</select><div class="hint">Optional default network.</div></div>
+    </div>`}`;
+  foot.innerHTML = `
+    <button class="btn" onclick="closeModal()">Cancel</button>
+    <button class="btn btn--primary" id="importParse">Preview import</button>`;
+  body.querySelectorAll('#importSrc [data-src]').forEach(b => b.addEventListener('click', () => {
+    captureImportStep1();
+    importWiz.source = b.dataset.src;
+    renderImportStep();
+  }));
+  const ta = document.getElementById('importText');
+  if (ta) ta.addEventListener('input', () => { importWiz.text = ta.value; });
+  const ff = document.getElementById('importFile');
+  if (ff) ff.addEventListener('change', (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    if (file.size > 2 * 1024 * 1024) { toast('File too large (>2MB)', 'err'); e.target.value = ''; return; }
+    const rd = new FileReader();
+    rd.onload = () => { importWiz.text = String(rd.result || ''); const t = document.getElementById('importText'); if (t) t.value = importWiz.text; toast('Loaded ' + file.name, 'ok'); };
+    rd.onerror = () => toast('Could not read that file', 'err');
+    rd.readAsText(file); e.target.value = '';
+  });
+  document.getElementById('importParse').addEventListener('click', doImportParse);
+}
+async function doImportParse() {
+  captureImportStep1();
+  const text = (importWiz.text || '').trim();
+  if (!text) { toast('Paste some output first', 'err'); const t = document.getElementById('importText'); if (t) t.focus(); return; }
+  if (importWiz.source === 'ss' && !importWiz.nodeId) { toast('Pick a node to attach ss ports to', 'err'); return; }
+  const btn = document.getElementById('importParse');
+  withSpinner(btn, 'Parsing…');
+  try {
+    importWiz.parsed = await api.importParse(importWiz.source, importWiz.text);
+    importWiz.step = 2;
+    renderImportStep();
+  } catch (e) {
+    clearSpinner(btn);
+    toast(e.message, 'err');
+  }
+}
+function renderImportStep2(body, foot) {
+  const p = importWiz.parsed || { nodes: [], ports: [], warnings: [] };
+  const nodes = p.nodes || [], ports = p.ports || [], warnings = p.warnings || [];
+  const empty = !nodes.length && !ports.length;
+  const refName = (ref) => { const nn = nodes.find(x => String(x.ref) === String(ref)); return nn ? nn.name : null; };
+  const tgtName = (pt) => {
+    if (pt.nodeRef != null && refName(pt.nodeRef)) return refName(pt.nodeRef);
+    if (importWiz.nodeId) { const nn = nodeById(importWiz.nodeId); if (nn) return nn.name; }
+    return null;
+  };
+  const warnHtml = warnings.length ? `
+    <div class="import-warn">
+      <div class="import-warn__head">${WARN_ICON}<span>${warnings.length} warning${warnings.length !== 1 ? 's' : ''}</span></div>
+      <ul>${warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>
+    </div>` : '';
+  const nodesHtml = nodes.length ? `
+    <div class="import-group">
+      <div class="import-group__head"><h4>Nodes</h4><span class="import-group__count">${nodes.length}</span></div>
+      <div class="ilist">${nodes.map(n => {
+        const t = TYPES[n.type] || { color: '#7c8aa0', label: n.type };
+        const sc = ['up', 'down', 'unknown'].includes(n.status) ? n.status : 'unknown';
+        return `<div class="irow"><span class="cmd__dot" style="background:${t.color}"></span><span class="irow__name">${esc(n.name)}</span>${n.ipAddress ? `<span class="irow__meta">${esc(n.ipAddress)}</span>` : ''}<span class="badge badge--${sc}"><span class="dot"></span>${esc(n.status || 'unknown')}</span></div>`;
+      }).join('')}</div>
+    </div>` : '';
+  const portsHtml = ports.length ? `
+    <div class="import-group">
+      <div class="import-group__head"><h4>Ports</h4><span class="import-group__count">${ports.length}</span></div>
+      <div class="ilist">${ports.map(pt => {
+        const exp = EXPOSURE[pt.exposure] || EXPOSURE.internal;
+        const tgt = tgtName(pt);
+        return `<div class="irow"><span class="irow__port">${esc(pt.portNumber)}/${esc(pt.protocol || 'tcp')}</span><span class="irow__name">${esc(pt.serviceName || 'unnamed')}${pt.hostPort != null ? ` <span class="irow__meta">host :${esc(pt.hostPort)}</span>` : ''}</span>${tgt ? `<span class="irow__tgt">→ ${esc(tgt)}</span>` : '<span class="irow__tgt irow__tgt--none">no target</span>'}<span class="tag ${exp.cls}">${exp.label}</span></div>`;
+      }).join('')}</div>
+    </div>` : '';
+  body.innerHTML = empty
+    ? `<div class="ports-empty" style="margin:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg><p>Nothing to import — the parser found no nodes or ports in that output.</p></div>${warnHtml}`
+    : `<div class="import-preview">${warnHtml}${nodesHtml}${portsHtml}</div>`;
+  foot.innerHTML = `
+    <button class="btn" id="importBack">Back</button>
+    <button class="btn btn--primary" id="importApply" ${empty ? 'disabled' : ''}>Apply import</button>`;
+  document.getElementById('importBack').addEventListener('click', () => { importWiz.step = 1; renderImportStep(); });
+  const ap = document.getElementById('importApply');
+  if (ap && !empty) ap.addEventListener('click', doImportApply);
+}
+async function doImportApply() {
+  const p = importWiz.parsed; if (!p) return;
+  const payload = { nodes: p.nodes || [], ports: p.ports || [] };
+  if (importWiz.source === 'ss') { if (importWiz.nodeId) payload.nodeId = importWiz.nodeId; }
+  else {
+    if (importWiz.parentId) payload.parentId = importWiz.parentId;
+    if (importWiz.networkId) payload.networkId = importWiz.networkId;
+    if (importWiz.nodeId) payload.nodeId = importWiz.nodeId;   // fallback target for any host-less ports
+  }
+  const btn = document.getElementById('importApply');
+  withSpinner(btn, 'Applying…');
+  try {
+    const r = await api.importApply(payload);
+    await reloadState();
+    syncGraph(); refreshChrome(); renderDetail(); updateReopen();
+    closeModal();
+    setTimeout(() => { if (network) network.fit({ animation: !REDUCE }); }, 40);
+    const cn = r.created.nodes, cp = r.created.ports, sn = r.skipped.nodes, sp = r.skipped.ports;
+    const skip = (sn || sp) ? ` · skipped ${sn} node${sn !== 1 ? 's' : ''}, ${sp} port${sp !== 1 ? 's' : ''}` : '';
+    toast(`Created ${cn} node${cn !== 1 ? 's' : ''}, ${cp} port${cp !== 1 ? 's' : ''}${skip}`, 'ok');
+  } catch (e) {
+    clearSpinner(btn);
+    toast(e.message, 'err');
+  }
+}
+
 /* ================= BOOT ================= */
 async function boot() {
   await refreshAuthStatus();
@@ -2150,6 +2633,7 @@ async function boot() {
   refreshChrome();
   updateReopen();
   applyLockState();                          // sets body.locked, badge, dragNodes, renders detail
+  setView(currentView, { silent: true });    // restore last-used view (graph | table) without re-persisting
   if (!authState.isSetup) openAuthModal('create');   // first run → must set a password (non-dismissible)
 }
 boot();

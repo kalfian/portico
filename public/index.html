@@ -32,6 +32,17 @@
     </div>
     <div class="statstrip" id="statStrip" aria-label="Topology summary"></div>
     <nav class="toolbar" aria-label="Primary actions">
+      <div class="seg seg--sm view-toggle" id="viewToggle" role="group" aria-label="View">
+        <button type="button" data-view="graph" aria-pressed="true" title="Graph view" aria-label="Graph view">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.7 7.6 10.6 16M16.3 7.6 13.4 16M8.5 6h7"/></svg>
+          <span class="vt-lbl">Graph</span>
+        </button>
+        <button type="button" data-view="table" aria-pressed="false" title="Table view" aria-label="Table view">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9.5" x2="21" y2="9.5"/><line x1="3" y1="14.5" x2="21" y2="14.5"/><line x1="9" y1="9.5" x2="9" y2="20"/></svg>
+          <span class="vt-lbl">Table</span>
+        </button>
+      </div>
+      <div class="toolbar__divider" aria-hidden="true"></div>
       <button class="btn btn--ghost btn--icon topbar-search-toggle" id="btnSearch" aria-label="Search" aria-expanded="false">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
       </button>
@@ -42,6 +53,10 @@
       <button class="auth-badge" id="btnAuth" title="Read-only — click to log in and edit" aria-label="Log in to edit">
         <span class="auth-badge__icon"></span>
         <span class="auth-badge__label">Read-only</span>
+      </button>
+      <button class="btn btn--ghost requires-edit" id="btnProbe" title="Check health — probe every node over the network" aria-label="Check health of all nodes">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg>
+        <span class="lbl">Check health</span>
       </button>
       <button class="btn btn--primary requires-edit" id="btnAddNode">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
@@ -114,6 +129,34 @@
       </button>
     </section>
 
+    <!-- node table (alternative to the graph) -->
+    <section class="table-wrap" id="tableView" aria-label="Node table" hidden>
+      <div class="tbl-toolbar">
+        <div class="search tbl-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
+          <input class="input" id="tableFilter" type="search" placeholder="Filter nodes by name, IP, tag…" aria-label="Filter nodes" autocomplete="off" />
+        </div>
+        <span class="tbl-count" id="tableCount" aria-live="polite"></span>
+      </div>
+      <div class="tbl-scroll" id="tableScroll">
+        <table class="ntable">
+          <thead>
+            <tr>
+              <th data-sort="name" aria-sort="ascending"><button type="button" class="th-btn">Name <span class="th-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></span></button></th>
+              <th data-sort="type"><button type="button" class="th-btn">Type <span class="th-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></span></button></th>
+              <th data-sort="ip"><button type="button" class="th-btn">IP <span class="th-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></span></button></th>
+              <th data-sort="network"><button type="button" class="th-btn">Network <span class="th-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></span></button></th>
+              <th data-sort="ports" class="th-num"><button type="button" class="th-btn">Ports <span class="th-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></span></button></th>
+              <th data-sort="exposure"><button type="button" class="th-btn">Exposure <span class="th-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></span></button></th>
+              <th data-sort="status"><button type="button" class="th-btn">Status <span class="th-caret"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></span></button></th>
+            </tr>
+          </thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+        <div class="tbl-empty" id="tableEmpty" hidden></div>
+      </div>
+    </section>
+
     <!-- detail panel -->
     <aside class="panel" aria-label="Node detail">
       <div class="panel__bar">
@@ -148,6 +191,7 @@
         <button class="btn" id="btnExport"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export JSON</button>
         <button class="btn requires-edit" id="btnImport"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Import JSON</button>
         <input type="file" id="fileImport" accept="application/json" class="sr-only" />
+        <button class="btn requires-edit" id="btnImportSource"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg> Import from source</button>
         <button class="btn requires-edit" id="btnTokens"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="M16 7l3 3"/><path d="M13 10l3 3"/></svg> API tokens</button>
         <button class="btn requires-edit" id="btnChangePw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="16" r="1"/></svg> Change password</button>
         <button class="btn btn--danger requires-edit" id="btnReset"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg> Reset to sample data</button>
