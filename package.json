@@ -1,0 +1,20 @@
+{
+  "name": "home-server-topology",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Home Server Topology & Port Manager — self-hosted topology + port inventory (backend, Fase 2)",
+  "type": "commonjs",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "node --watch server/index.js",
+    "start": "node server/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1"
+  }
+}
