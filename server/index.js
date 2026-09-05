@@ -46,6 +46,7 @@ app.use('/api', require('./routes/nodes'));
 app.use('/api', require('./routes/ports'));
 app.use('/api', require('./routes/networks'));
 app.use('/api', require('./routes/links'));
+app.use('/api', require('./routes/icons'));
 app.use('/api', require('./routes/data'));
 
 // Unknown API route → JSON 404 (don't fall through to static/index.html).
