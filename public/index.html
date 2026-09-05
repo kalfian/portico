@@ -1,21 +1,163 @@
-<!doctype html>
-<html lang="en">
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Home Server Topology & Port Manager</title>
-  <style>
-    body { font: 15px/1.6 system-ui, sans-serif; background: #0b0e14; color: #cdd6e4; margin: 0; display: grid; place-items: center; min-height: 100vh; }
-    main { text-align: center; padding: 2rem; }
-    code { background: #161b26; padding: .15em .45em; border-radius: 6px; color: #7cc4fb; }
-    a { color: #4f9dff; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Home Server Topology &amp; Port Manager</title>
+<!-- vis-network for the interactive topology graph (vendored locally — no CDN, air-gap friendly) -->
+<script src="/vendor/vis-network.min.js"></script>
+<link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <main>
-    <h1>Home Server Topology &amp; Port Manager</h1>
-    <p>Backend is running. The interactive UI ships in a later phase.</p>
-    <p>API is live under <code>/api</code> — try <a href="/api/topology">/api/topology</a>.</p>
-  </main>
+<div class="app">
+  <!-- ============ TOP BAR ============ -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand__mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/>
+          <line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/>
+        </svg>
+      </div>
+      <div>
+        <div class="brand__title">Home Server Topology</div>
+        <div class="brand__sub">Nodes &amp; port map · self-hosted</div>
+      </div>
+    </div>
+    <div class="cmd" id="cmd">
+      <svg class="cmd__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
+      <input id="cmdInput" type="search" placeholder="Search nodes, ports, IPs…" aria-label="Search everything" aria-expanded="false" aria-controls="cmdResults" aria-autocomplete="list" role="combobox" autocomplete="off" />
+      <kbd class="cmd__kbd">/</kbd>
+      <div class="cmd__results" id="cmdResults" role="listbox" aria-label="Search results"></div>
+    </div>
+    <div class="statstrip" id="statStrip" aria-label="Topology summary"></div>
+    <nav class="toolbar" aria-label="Primary actions">
+      <button class="btn btn--ghost btn--icon topbar-search-toggle" id="btnSearch" aria-label="Search" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
+      </button>
+      <button class="btn btn--ghost btn--icon warn-badge" id="btnWarnings" title="No conflicts detected" aria-label="Conflicts">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <span class="warn-count" aria-hidden="true">0</span>
+      </button>
+      <button class="auth-badge" id="btnAuth" title="Read-only — click to log in and edit" aria-label="Log in to edit">
+        <span class="auth-badge__icon"></span>
+        <span class="auth-badge__label">Read-only</span>
+      </button>
+      <button class="btn btn--primary requires-edit" id="btnAddNode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        <span class="lbl">Add node</span>
+      </button>
+      <div class="toolbar__divider" aria-hidden="true"></div>
+      <button class="btn btn--ghost btn--icon" id="btnMenu" title="Data: export / import / tokens" aria-label="Data menu" aria-haspopup="dialog" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="12" cy="19" r="1.3"/></svg>
+      </button>
+    </nav>
+  </header>
+
+  <!-- ============ MAIN ============ -->
+  <div class="main">
+    <!-- graph -->
+    <section class="graph-wrap" aria-label="Topology graph">
+      <div id="graph"></div>
+      <div class="sample-banner" id="sampleBanner">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span>Sample topology loaded — illustrative only. Edit, delete, or reset any time.</span>
+        <button class="btn btn--sm btn--ghost" id="dismissBanner" aria-label="Dismiss">Got it</button>
+      </div>
+      <div class="layers" id="layers" role="group" aria-label="Graph layers">
+        <div class="layers__head">
+          <span class="layers__title">Layers</span>
+          <button class="layers__toggle" id="layersToggle" aria-expanded="true" aria-controls="layersBody" aria-label="Collapse layers panel"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg></button>
+        </div>
+        <div class="layers__body" id="layersBody">
+          <div class="layers__row">
+            <span class="layers__label">Color by</span>
+            <div class="seg seg--sm" id="colorBySeg" role="group" aria-label="Colour nodes by">
+              <button data-cb="type" aria-pressed="true">Type</button>
+              <button data-cb="network" aria-pressed="false">Network</button>
+            </div>
+          </div>
+          <div class="legend__grid" id="legendGrid"></div>
+          <div class="layers__sep"></div>
+          <div class="layers__label" style="margin-bottom:6px">Edges</div>
+          <div class="layers__edges" id="edgeToggleList"></div>
+          <div class="layers__actions">
+            <button class="layers__link" id="btnNetworks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><path d="M6.5 10v3a1 1 0 0 0 1 1H14"/></svg>Networks</button>
+            <button class="layers__link" id="btnLinks"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15 15 9"/><path d="M11 6.5 12.6 5a4 4 0 0 1 5.7 5.7L16.7 12"/><path d="M13 17.5 11.4 19a4 4 0 0 1-5.7-5.7L7.3 12"/></svg>Links</button>
+          </div>
+        </div>
+      </div>
+      <div class="graph-hint">Click a node to inspect · drag to reposition · scroll to zoom</div>
+
+      <!-- floating canvas controls -->
+      <div class="fab" role="group" aria-label="Canvas controls">
+        <button id="btnZoomIn" title="Zoom in" aria-label="Zoom in"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="6" x2="12" y2="18"/><line x1="6" y1="12" x2="18" y2="12"/></svg></button>
+        <button id="btnZoomOut" title="Zoom out" aria-label="Zoom out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="12" x2="18" y2="12"/></svg></button>
+        <button id="btnFit" class="fab__sep" title="Fit to view" aria-label="Fit all nodes to view"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4"/><path d="M20 9V5a1 1 0 0 0-1-1h-4"/><path d="M4 15v4a1 1 0 0 0 1 1h4"/><path d="M20 15v4a1 1 0 0 1-1 1h-4"/></svg></button>
+        <button id="btnArrange" class="requires-edit" title="Auto-arrange layout" aria-label="Auto-arrange layout"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="8.5" y="14" width="7" height="7" rx="1"/><path d="M6.5 10v2m11-2v2M12 14v-2"/></svg></button>
+      </div>
+
+      <!-- empty canvas state (zero nodes) -->
+      <div class="canvas-empty" id="canvasEmpty">
+        <div class="canvas-empty__art"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.7 7.6 10.6 16M16.3 7.6 13.4 16M8.5 6h7"/></svg></div>
+        <div>
+          <h2>Your topology is empty</h2>
+          <p>Add your first machine — a Proxmox host, a Docker box, a router — and start mapping nodes and ports.</p>
+        </div>
+        <button class="btn btn--primary" onclick="openNodeModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> Add node</button>
+      </div>
+
+      <!-- reopen sidebar tab (last selected node) -->
+      <button class="panel-reopen" id="panelReopen" aria-label="Reopen details panel">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 6 9 12 15 18"/></svg>
+        <span class="pr-name" id="panelReopenName">Details</span>
+      </button>
+    </section>
+
+    <!-- detail panel -->
+    <aside class="panel" aria-label="Node detail">
+      <div class="panel__bar">
+        <span class="panel__bar-title">Node details</span>
+        <span class="spacer"></span>
+        <button class="panel-collapse" id="panelCollapse" title="Hide panel">
+          <span>Hide</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 6 15 12 9 18"/></svg>
+        </button>
+      </div>
+      <div class="panel__scroll" id="detail">
+        <!-- empty state / node detail injected here -->
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- ============ MODALS ============ -->
+<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div class="modal" id="modal"></div>
+</div>
+
+<!-- data menu (reuses overlay pattern) -->
+<div class="overlay" id="menuOverlay" role="dialog" aria-modal="true" aria-labelledby="menuTitle">
+  <div class="modal" style="max-width:420px">
+    <div class="modal__head"><h3 id="menuTitle">Data</h3>
+      <button class="btn btn--ghost btn--icon" data-close-menu aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
+    </div>
+    <div class="modal__body">
+      <p class="confirm-text" style="margin-top:0">Your topology is stored on the server (SQLite). Export the JSON to back it up or migrate it; import replaces everything.</p>
+      <div style="display:grid; gap:var(--sp-2); margin-top:var(--sp-4)">
+        <button class="btn" id="btnExport"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Export JSON</button>
+        <button class="btn requires-edit" id="btnImport"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg> Import JSON</button>
+        <input type="file" id="fileImport" accept="application/json" class="sr-only" />
+        <button class="btn requires-edit" id="btnTokens"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.7 12.3 21 2"/><path d="M16 7l3 3"/><path d="M13 10l3 3"/></svg> API tokens</button>
+        <button class="btn requires-edit" id="btnChangePw"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="16" r="1"/></svg> Change password</button>
+        <button class="btn btn--danger requires-edit" id="btnReset"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg> Reset to sample data</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast-host" id="toastHost" aria-live="polite"></div>
+
+<script src="/app.js"></script>
 </body>
 </html>
