@@ -135,4 +135,23 @@ links, and the selfh.st icon slugs).
 
 ## Docker
 
-Fase 3 — a `Dockerfile` + `docker-compose.yml` with a `./data` volume come later.
+Multi-stage `Dockerfile` (build stage compiles `better-sqlite3`; slim runtime, runs as
+non-root `node`, with a `HEALTHCHECK`).
+
+```bash
+docker compose up -d --build
+# → http://localhost:3000
+```
+
+The SQLite DB and the cached selfh.st icons live in the named volume `portico_data`
+(`/app/data`), so they persist across restarts and rebuilds. Prefer a host path?
+swap the volume line in `docker-compose.yml` for `- ./data:/app/data`.
+
+Set a strong secret for any real deployment (a `.env` next to the compose file works):
+
+```
+SESSION_SECRET=<random-long-string>
+COOKIE_SECURE=true   # when served over HTTPS / behind a reverse proxy
+```
+
+Override the published port with `PORT=8080 docker compose up -d` (maps host `8080`→`3000`).
