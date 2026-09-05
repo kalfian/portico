@@ -106,12 +106,84 @@ Mutations (require session OR `read_write` bearer token):
 - `POST /api/networks`, `PUT /api/networks/:id`, `DELETE /api/networks/:id`
 - `POST /api/links`, `PUT /api/links/:id`, `DELETE /api/links/:id`
 - `POST /api/import` (replace-all, transactional)
+- `POST /api/probe`, `POST /api/nodes/:id/probe` (active health check)
+- `POST /api/import/parse`, `POST /api/import/apply` (import from real sources)
 
 Session-only (interactive):
 - `POST /api/auth/setup`, `POST /api/auth/login`, `POST /api/auth/logout`, `POST /api/auth/change-password`
 - `GET /api/tokens`, `POST /api/tokens`, `DELETE /api/tokens/:id`
 
 JSON is camelCase; the DB is snake_case (mapped in `server/lib/mappers.js`).
+
+## Active health check (probe)
+
+Probe live reachability of nodes and their ports. A short **TCP connect** to
+`node.ipAddress : port.portNumber` (IPv4 only, concurrency-capped, hard time
+budget) decides reachability; http/https-scheme ports are optionally refined with
+an HTTP(S) `HEAD /`. Probes are **mutations** (auth required) and touch only:
+
+- **`port.last_seen`** ← set to now when that port's TCP connect succeeds (never overwrites `port.status` = `in_use`/`reserved`).
+- **`node.status`** ← `up` if any port is reachable, `down` if it had probeable TCP ports but none opened. `unknown` (no IPv4 address / no TCP ports) leaves the stored status untouched.
+- **`node.last_seen`** ← set to now when the node is `up` (preserved otherwise).
+
+UDP ports and nodes without an IPv4 address are reported as `skipped`.
+
+```bash
+# probe everything (or a subset with {"nodeIds":["n-abc","n-def"]})
+curl -s -H "Authorization: Bearer hst_<...>" -X POST http://localhost:3000/api/probe \
+  -H 'Content-Type: application/json' -d '{"timeout":1500,"concurrency":10}'
+# → { "probed":12, "up":9, "down":2, "unknown":1, "timeoutMs":1500, "concurrency":10,
+#     "results":[ { "nodeId":"n-...", "status":"up", "lastSeen":"2026-09-05T...",
+#                   "ports":[ { "portNumber":443, "protocol":"tcp", "open":true, "httpOk":true, "lastSeen":"..." } ] } ] }
+
+# probe a single node + its ports
+curl -s -H "Authorization: Bearer hst_<...>" -X POST http://localhost:3000/api/nodes/n-abc/probe
+```
+
+Guardrails: per-request caps (≤200 nodes, ≤2000 ports), per-connect timeout
+200–10000 ms (default 1500), concurrency 1–20 (default 10), 60 s overall budget.
+
+## Import from real sources (parse → preview → apply)
+
+Turn real command output into nodes + ports in two steps so you can review before
+anything is written. Both steps require auth.
+
+**Step 1 — parse (dry-run, no DB writes):** `POST /api/import/parse` with
+`{ source, text }`. `source` ∈ `docker_ps` | `ss` | `proxmox` | `nmap`. Returns a
+preview `{ source, nodes, ports, warnings }`. Preview nodes carry a `ref`; preview
+ports link to a node via `nodeRef` (points to a preview node's `ref`) — except `ss`
+ports, which have `nodeRef:null` (you pick their target node at apply time).
+
+Supported formats per source:
+
+- **`docker_ps`** — both `docker ps` table output **and** `docker ps --format '{{json .}}'` JSON-lines. Container → node (`type:container`); published mappings `0.0.0.0:8080->80/tcp` → port (`portNumber:80`, `hostPort:8080`, `protocol:tcp`), exposure `public` for `0.0.0.0`/`::`, `lan` for a specific host IP, `internal` for exposed-only.
+- **`ss`** — `ss -tlnp` / `ss -tulpn` listening sockets → ports (port, protocol, service name from `users:(("name",...))`). Loopback binds → `internal`, all-interface binds → `lan`. Ports come back with no node.
+- **`proxmox`** — `qm list` (VMs → `type:vm`) and `pct list` (LXCs → `type:lxc`); name + status, `vmid` in `role`/`notes`.
+- **`nmap`** — `nmap -oX -` XML → hosts (nodes by IPv4) + open ports (port, protocol, service name).
+
+```bash
+curl -s -H "Authorization: Bearer hst_<...>" -X POST http://localhost:3000/api/import/parse \
+  -H 'Content-Type: application/json' \
+  -d '{"source":"docker_ps","text":"0.0.0.0:8080->80/tcp   my-web\n"}'
+# → { "source":"docker_ps", "nodes":[{"ref":"docker:my-web:0","name":"my-web","type":"container",...}],
+#     "ports":[{"nodeRef":"docker:my-web:0","portNumber":80,"hostPort":8080,"protocol":"tcp","exposure":"public",...}],
+#     "warnings":[] }
+```
+
+**Step 2 — apply (additive, one transaction, de-duped):** `POST /api/import/apply`
+with the previewed (optionally edited) payload
+`{ nodes, ports, parentId?, networkId?, nodeId? }`. `parentId`/`networkId` set
+defaults for created nodes; `nodeId` is the fallback target node for ports lacking
+a `nodeId`/`nodeRef` (used for `ss`). De-dupes nodes by name **or** `ipAddress`
+and ports by `(node, portNumber, protocol)`; validates IPs/enums/uniqueness via
+the same store guards. Returns created vs skipped counts + details.
+
+```bash
+curl -s -H "Authorization: Bearer hst_<...>" -X POST http://localhost:3000/api/import/apply \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":[{"ref":"r1","name":"my-web","type":"container"}],"ports":[{"nodeRef":"r1","portNumber":80,"protocol":"tcp"}]}'
+# → { "created":{"nodes":1,"ports":1}, "skipped":{"nodes":0,"ports":0}, "nodes":{...}, "ports":{...} }
+```
 
 ## Schema & migrations
 
