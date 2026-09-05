@@ -227,3 +227,17 @@ COOKIE_SECURE=true   # when served over HTTPS / behind a reverse proxy
 ```
 
 Override the published port with `PORT=8080 docker compose up -d` (maps host `8080`→`3000`).
+
+### Prebuilt image (GitHub Container Registry)
+
+A GitHub Actions workflow (`.github/workflows/docker-publish.yml`) builds a multi-arch
+image (`linux/amd64` + `linux/arm64`) and publishes it to GHCR on every push to `main`
+and on `v*` tags — no manual `docker push` needed.
+
+```bash
+docker run -d -p 3000:3000 -v portico_data:/app/data ghcr.io/kalfian/portico:latest
+```
+
+Tags: `latest` (main), `sha-<short>` per commit, and `X.Y.Z` / `X.Y` when you push a
+`vX.Y.Z` git tag. The package is private by default — make it public in the repo's
+*Packages → portico → Package settings* if you want anonymous `docker pull`.
