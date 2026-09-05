@@ -1,9 +1,9 @@
 # Home Server Topology & Port Manager
 
 Self-hosted tool to map home-server topology (parent→child containment + typed
-relationships) and inventory ports per node. This is the **Fase 2 backend**:
-Node + Express + SQLite (better-sqlite3). The interactive frontend ships in a
-later phase; Express already serves `public/` (currently a placeholder).
+relationships) and inventory ports per node. Node + Express + SQLite
+(better-sqlite3), with an interactive vis-network frontend served from `public/`.
+The UI talks to the REST API below and is gated by the same server-side auth.
 
 ## Run locally
 
@@ -14,9 +14,19 @@ npm run dev      # node --watch server/index.js (auto-restart)
 npm start        # node server/index.js
 ```
 
-Then open http://localhost:3000 (placeholder page) and hit the API under `/api`.
+Then open http://localhost:3000 for the interactive UI (or hit the API under `/api`).
 On first boot the DB is created at `data/topology.db` (WAL mode) and seeded with a
-sample topology.
+sample topology, and the app prompts you to create the password on first load.
+
+## Frontend
+
+The `public/` app (vis-network topology graph + port/network/link management,
+free-port & free-IP finders, exposure/conflict views, search, per-node selfh.st
+icons, animated edges, responsive) is served statically by Express. It loads state
+from `GET /api/topology`, sends every change through the REST API, and gates editing
+on the server session (read-only until you log in). vis-network is vendored under
+`public/vendor/` (no CDN). selfh.st icons load via the caching proxy `GET /api/icons/:slug`
+(fetched once, cached under `data/icons/`) so they work air-gapped after a warm cache.
 
 ## Environment variables
 
@@ -87,6 +97,7 @@ Reads (public):
 - `GET /api/links`
 - `GET /api/topology`, `GET /api/export`
 - `GET /api/llm/context`, `GET /api/openapi.json`
+- `GET /api/icons/:slug` (cached selfh.st proxy), `GET /api/icons` (index for autocomplete)
 - `GET /api/auth/status`
 
 Mutations (require session OR `read_write` bearer token):
