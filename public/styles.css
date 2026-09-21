@@ -991,6 +991,35 @@ select.input {
 }
 @keyframes sheetUp { from { transform: translateY(100%); } to { transform: none; } }
 
+/* final mobile hardening: keep every flex child shrinkable and let dense
+   topology/table content scroll inside its own region instead of widening the
+   document. */
+@media (max-width: 900px) {
+  .app, .main, .graph-wrap, .table-view, .table-wrap { min-width: 0; }
+  .graph-wrap { min-height: 0; }
+  .panel__scroll, .table-wrap { overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+  .panel-reopen { right: 0; }
+}
+@media (max-width: 560px) {
+  .topbar { flex-wrap: nowrap; min-width: 0; }
+  .brand { min-width: 0; flex: 1 1 auto; }
+  .brand__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toolbar { flex: 0 0 auto; max-width: 58vw; overflow-x: auto; scrollbar-width: none; }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .graph-wrap { min-height: 260px; }
+  .layers { max-width: calc(100vw - 92px); }
+  .node-head, .panel__bar { padding-left: var(--sp-3); padding-right: var(--sp-3); }
+  .dl { grid-template-columns: 78px minmax(0, 1fr); }
+  .ptable-wrap, .ntable-wrap { max-width: 100%; overflow-x: auto; }
+  .ptable, .ntable { min-width: 520px; }
+}
+@media (max-width: 380px) {
+  .brand__mark { width: 28px; height: 28px; }
+  .brand__title { font-size: var(--t-sm); }
+  .toolbar { max-width: 52vw; }
+  .layers { left: var(--sp-2); right: 58px; bottom: var(--sp-2); }
+}
+
 /* ports table: never overflow the viewport — scroll within its own box on very narrow */
 .ptable-wrap { overflow-x: auto; margin: 0 calc(-1 * var(--sp-1)); }
 @media (max-width: 400px) { .ptable td, .ptable thead th { padding: var(--sp-2) 4px; } }
