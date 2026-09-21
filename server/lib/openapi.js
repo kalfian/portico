@@ -78,6 +78,8 @@ const spec = {
         properties: {
           id: { type: 'string' },
           nodeId: { type: 'string' },
+          posX: { type: 'number', nullable: true },
+          posY: { type: 'number', nullable: true },
           portNumber: { type: 'integer', minimum: 1, maximum: 65535 },
           protocol: { type: 'string', enum: ['tcp', 'udp'] },
           serviceName: { type: 'string' },

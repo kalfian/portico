@@ -50,12 +50,23 @@ test('fresh database API: ownership, statuses, exposure, cycles, auth and round 
     for (const [i, status] of ['in_use', 'reserved', 'active', 'up', 'inactive', 'down'].entries()) {
       const p = await request(`/nodes/${root.id}/ports`, 'POST', {
         portNumber: 8100 + i, protocol: i % 2 ? 'udp' : 'tcp', serviceName: `service-${i}`, status,
+        posX: i * 120, posY: -i * 50,
         exposureMode: i === 0 ? 'cloudflare' : 'lan', domain: i === 0 ? 'test.example.com' : '',
       }, 201);
+      assert.equal(p.posX, i * 120);
+      assert.equal(p.posY, -i * 50 || 0);
       assert.equal(p.status, status);
       assert.equal(p.nodeId, root.id);
       assert.equal(p.exposureMode, i === 0 ? 'cloudflare' : 'lan');
       const updated = await request(`/ports/${p.id}`, 'PUT', { description: 'edited' });
+      assert.equal(updated.posX, p.posX);
+      assert.equal(updated.posY, p.posY);
+      await request(`/ports/${p.id}`, 'PUT', { posX: 999, posY: 999 }, 401, false);
+      assert.deepEqual((await request(`/nodes/${root.id}/ports`)).find(x => x.id === p.id), updated);
+      const moved = await request(`/ports/${p.id}`, 'PUT', { posX: i * 10, posY: -20 });
+      assert.equal(moved.nodeId, root.id);
+      assert.equal(moved.posX, i * 10);
+      assert.equal(moved.posY, -20);
       assert.equal(updated.status, status);
       assert.equal(updated.exposureMode, p.exposureMode);
     }
@@ -128,14 +139,14 @@ test('graph port retention and independent collapse; drag draft persistence guar
   const writes = [];
   const button = { setAttribute() {}, removeAttribute() {} };
   Object.assign(context, { requireEdit: () => false, layoutDirty: true,
-    document: { getElementById: () => button }, api: { updateNode: async (...args) => writes.push(args) }, toast() {} });
+    document: { getElementById: () => button }, api: { updateNode: async (...args) => writes.push(args), updatePort: async (...args) => writes.push(args) }, toast() {} });
   vm.runInContext('async ' + extract('saveLayout'), context);
   await vm.runInContext('saveLayout()', context);
   assert.equal(writes.length, 0);
   assert.equal(context.layoutDirty, true);
   context.requireEdit = () => true;
   await vm.runInContext('saveLayout()', context);
-  assert.equal(writes.length, 2);
+  assert.equal(writes.length, 5);
   assert.equal(context.layoutDirty, false);
   assert.match(extract('saveLayout'), /if \(!requireEdit\(\) \|\| !layoutDirty\) return/);
   const drag = source.slice(source.indexOf("network.on('dragEnd'"), source.indexOf("network.on('dragEnd'") + 900);
@@ -163,5 +174,23 @@ test('migration preserves inventory provenance, Cloudflare routes and legacy por
     const migrated = db.prepare('SELECT * FROM ports ORDER BY id').all();
     assert.deepEqual(migrated.map(({ exposure_mode, ...p }) => p), ports);
     assert.deepEqual(migrated.map(p => p.exposure_mode), ['lan', 'cloudflare']);
+  } finally { db.close(); }
+});
+
+test('port position migration keeps legacy ports unset and independent coordinates durable', () => {
+  const Database = require('better-sqlite3');
+  const db = new Database(':memory:');
+  try {
+    for (const file of fs.readdirSync('server/migrations').sort().filter(f => /^00[1-8]_/.test(f))) db.exec(fs.readFileSync(path.join('server/migrations', file), 'utf8'));
+    db.exec("INSERT INTO nodes (id,name,type,created_at,updated_at) VALUES ('n','N','physical','now','now'); INSERT INTO ports (id,node_id,port_number,created_at,updated_at) VALUES ('a','n',80,'now','now'), ('b','n',81,'now','now')");
+    const before = db.prepare('SELECT * FROM ports ORDER BY id').all();
+    db.exec(fs.readFileSync('server/migrations/009_port_positions.sql', 'utf8'));
+    const after = db.prepare('SELECT * FROM ports ORDER BY id').all();
+    assert.deepEqual(after.map(({ pos_x, pos_y, ...p }) => p), before);
+    assert.ok(after.every(p => p.pos_x === null && p.pos_y === null));
+    db.prepare('UPDATE ports SET pos_x=?,pos_y=? WHERE id=?').run(0, -25, 'a');
+    assert.deepEqual(db.prepare('SELECT id,node_id,pos_x,pos_y FROM ports ORDER BY id').all(), [
+      { id: 'a', node_id: 'n', pos_x: 0, pos_y: -25 }, { id: 'b', node_id: 'n', pos_x: null, pos_y: null },
+    ]);
   } finally { db.close(); }
 });

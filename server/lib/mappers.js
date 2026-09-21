@@ -34,6 +34,8 @@ function portToApi(row) {
   return {
     id: row.id,
     nodeId: row.node_id,
+    posX: row.pos_x ?? null,
+    posY: row.pos_y ?? null,
     portNumber: row.port_number,
     protocol: row.protocol,
     serviceName: row.service_name,

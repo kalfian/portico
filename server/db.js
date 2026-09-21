@@ -29,6 +29,7 @@ const MIGRATIONS = [
   { version: 6, file: '006_route_target_metadata.sql' },
   { version: 7, file: '007_port_cloudflare_relation.sql' },
   { version: 8, file: '008_port_exposure_mode.sql' },
+  { version: 9, file: '009_port_positions.sql' },
 ];
 
 function runMigrations() {

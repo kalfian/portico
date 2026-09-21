@@ -355,13 +355,22 @@ let tableSort = (() => {
 
 /* replace-in-place helpers for surgical local state updates after a mutation */
 function replaceNode(n) { const draft = state.nodes.find(x => x.id === n.id); if (layoutDirty && draft) { n.posX = draft.posX; n.posY = draft.posY; } const i = state.nodes.findIndex(x => x.id === n.id); if (i >= 0) state.nodes[i] = n; else state.nodes.push(n); }
-function replacePort(p) { const i = state.ports.findIndex(x => x.id === p.id); if (i >= 0) state.ports[i] = p; else state.ports.push(p); }
+function replacePort(p) { const draft = state.ports.find(x => x.id === p.id); if (layoutDirty && draft) { p.posX = draft.posX; p.posY = draft.posY; } const i = state.ports.findIndex(x => x.id === p.id); if (i >= 0) state.ports[i] = p; else state.ports.push(p); }
 function replaceNetwork(w) { const i = state.networks.findIndex(x => x.id === w.id); if (i >= 0) state.networks[i] = w; else state.networks.push(w); }
 function replaceLink(l) { const i = state.links.findIndex(x => x.id === l.id); if (i >= 0) state.links[i] = l; else state.links.push(l); }
 
 /* refetch the whole topology (used after cascading server mutations: node/network delete, import, reset) */
 async function reloadState() {
   const topo = await api.topology();
+  if (layoutDirty) {
+    for (const key of ['nodes', 'ports']) {
+      const drafts = new Map(state[key].map(item => [item.id, item]));
+      for (const item of topo[key] || []) {
+        const draft = drafts.get(item.id);
+        if (draft) { item.posX = draft.posX; item.posY = draft.posY; }
+      }
+    }
+  }
   state = { nodes: topo.nodes || [], ports: topo.ports || [], networks: topo.networks || [], links: topo.links || [], cloudflareRoutes: topo.cloudflareRoutes || [] };
 }
 
@@ -378,7 +387,10 @@ async function saveLayout() {
   const btn = document.getElementById('btnSaveLayout');
   if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
   try {
-    await Promise.all(state.nodes.map(n => api.updateNode(n.id, { posX: n.posX, posY: n.posY })));
+    await Promise.all([
+      ...state.nodes.map(n => api.updateNode(n.id, { posX: n.posX, posY: n.posY })),
+      ...state.ports.map(p => api.updatePort(p.id, { posX: p.posX, posY: p.posY })),
+    ]);
     layoutDirty = false;
     if (btn) btn.hidden = true;
     toast('Layout saved', 'ok');
@@ -496,7 +508,7 @@ function portVis(p) {
   const start = -((Math.max(owned.length, 1) - 1) * gap) / 2;
   return {
     id: portGraphId(p), label: `${p.serviceName || 'service'}\n${p.portNumber}/${p.protocol} · ${exposure.label} · ${p.status}\n${exposureModeLabel(p)}${domain}${target ? `\n→ ${target.name}` : ''}`,
-    shape: 'box', margin: 7, x: (owner?.posX || 0) + start + index * gap, y: (owner?.posY || 0) + 135,
+    shape: 'box', margin: 7, x: p.posX ?? ((owner?.posX || 0) + start + index * gap), y: p.posY ?? ((owner?.posY || 0) + 135),
     color: { background: '#192532', border: exposure.label === 'public' ? '#f87171' : '#3b82f6', highlight: { background: '#22364a', border: '#67e8f9' } },
     font: { color: '#dbeafe', size: 10, face: 'SFMono-Regular, monospace', multi: 'md' },
     borderWidth: 1, shadow: { enabled: true, color: 'rgba(0,0,0,.3)', size: 6, x: 0, y: 2 },
@@ -565,7 +577,9 @@ function buildGraph() {
     if (!params.nodes.length) return;
     params.nodes.forEach(id => {
       const pos = network.getPositions([id])[id];
-      const n = state.nodes.find(x => x.id === id);
+      const n = String(id).startsWith('port:')
+        ? state.ports.find(p => portGraphId(p) === id)
+        : state.nodes.find(x => x.id === id);
       if (n && pos) { n.posX = Math.round(pos.x); n.posY = Math.round(pos.y); markLayoutDirty(); }
     });
     syncGraph();
@@ -710,7 +724,7 @@ function refreshGraphNode(id) {
   if (n && nodesDS && nodesDS.get(id)) nodesDS.update(nodeVis(n));
 }
 
-/* auto-arrange: run hierarchical once, capture positions, persist to server, revert to manual */
+/* auto-arrange: run hierarchical once, capture draft positions, revert to manual */
 function autoArrange() {
   if (!requireEdit()) return;
   network.setOptions({ layout: { hierarchical: { enabled: true, direction: 'UD', sortMethod: 'directed', levelSeparation: 150, nodeSpacing: 150, treeSpacing: 180 } } });
@@ -718,6 +732,10 @@ function autoArrange() {
     const pos = network.getPositions();
     state.nodes.forEach(n => {
       if (pos[n.id]) { n.posX = Math.round(pos[n.id].x); n.posY = Math.round(pos[n.id].y); }
+    });
+    state.ports.forEach(p => {
+      const point = pos[portGraphId(p)];
+      if (point) { p.posX = Math.round(point.x); p.posY = Math.round(point.y); }
     });
     network.setOptions({ layout: { hierarchical: { enabled: false } } });
     syncGraph();
@@ -2741,8 +2759,7 @@ async function doImportApply() {
 async function boot() {
   await refreshAuthStatus();
   try {
-    const topo = await api.topology();
-    state = { nodes: topo.nodes || [], ports: topo.ports || [], networks: topo.networks || [], links: topo.links || [], cloudflareRoutes: topo.cloudflareRoutes || [] };
+    await reloadState();
   } catch (e) {
     toast('Failed to load topology: ' + e.message, 'err');
   }

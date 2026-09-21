@@ -220,11 +220,13 @@ function inferScheme(f) {
 
 function resolvePortFields(body, existing) {
   const base = existing || {
-    port_number: null, protocol: 'tcp', service_name: '', description: '', status: 'in_use',
+    pos_x: null, pos_y: null, port_number: null, protocol: 'tcp', service_name: '', description: '', status: 'in_use',
     domain: '', exposure: 'internal', scheme: 'http', host_port: null, target_node_id: null,
   };
   const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
   const f = {
+    posX: has('posX') ? body.posX : base.pos_x,
+    posY: has('posY') ? body.posY : base.pos_y,
     portNumber: has('portNumber') ? body.portNumber : base.port_number,
     protocol: has('protocol') ? body.protocol : base.protocol,
     serviceName: has('serviceName') ? body.serviceName : base.service_name,
@@ -265,9 +267,9 @@ function validatePortFields(f) {
 }
 
 const insPort = db.prepare(`
-  INSERT INTO ports (id, node_id, port_number, protocol, service_name, description, status,
+  INSERT INTO ports (pos_x, pos_y, id, node_id, port_number, protocol, service_name, description, status,
                      domain, exposure, exposure_mode, scheme, host_port, target_node_id, cloudflare_route_id, last_seen, source, external_id, observed_at, created_at, updated_at)
-  VALUES (@id, @node_id, @port_number, @protocol, @service_name, @description, @status,
+  VALUES (@pos_x, @pos_y, @id, @node_id, @port_number, @protocol, @service_name, @description, @status,
           @domain, @exposure, @exposure_mode, @scheme, @host_port, @target_node_id, @cloudflare_route_id, @last_seen, @source, @external_id, @observed_at, @created_at, @updated_at)
 `);
 
@@ -282,6 +284,7 @@ function createPort(nodeId, body) {
       id, node_id: nodeId, port_number: Number(f.portNumber), protocol: f.protocol,
       service_name: f.serviceName || '', description: f.description || '', status: f.status,
       domain: f.domain || '', exposure: f.exposure, exposure_mode: f.exposureMode, scheme: f.scheme,
+      pos_x: f.posX == null ? null : Number(f.posX) || 0, pos_y: f.posY == null ? null : Number(f.posY) || 0,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
       target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId || null, last_seen: null, source: body.source || null, external_id: body.externalId || null, observed_at: body.observedAt || null, created_at: ts, updated_at: ts,
     });
@@ -290,7 +293,7 @@ function createPort(nodeId, body) {
 }
 
 const updPort = db.prepare(`
-  UPDATE ports SET port_number=@port_number, protocol=@protocol, service_name=@service_name,
+  UPDATE ports SET pos_x=@pos_x, pos_y=@pos_y, port_number=@port_number, protocol=@protocol, service_name=@service_name,
     description=@description, status=@status, domain=@domain, exposure=@exposure, exposure_mode=@exposure_mode, scheme=@scheme,
     host_port=@host_port, target_node_id=@target_node_id, cloudflare_route_id=@cloudflare_route_id, updated_at=@updated_at
   WHERE id=@id
@@ -306,6 +309,7 @@ function updatePort(id, body) {
       id, port_number: Number(f.portNumber), protocol: f.protocol, service_name: f.serviceName || '',
       description: f.description || '', status: f.status, domain: f.domain || '', exposure: f.exposure, exposure_mode: f.exposureMode,
       scheme: f.scheme,
+      pos_x: f.posX == null ? null : Number(f.posX) || 0, pos_y: f.posY == null ? null : Number(f.posY) || 0,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
       target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId === undefined ? existing.cloudflare_route_id : (body.cloudflareRouteId || null), updated_at: now(),
     });
@@ -602,6 +606,7 @@ function importAll(data) {
     for (const p of ports) {
       const f = normalizeImportedPort(p);
       insPort.run({
+        pos_x: p.posX == null ? null : Number(p.posX) || 0, pos_y: p.posY == null ? null : Number(p.posY) || 0,
         id: p.id || uid('p'), node_id: p.nodeId, port_number: Number(p.portNumber),
         protocol: E.PORT_PROTOCOLS.includes(p.protocol) ? p.protocol : 'tcp',
         service_name: p.serviceName || '', description: p.description || '',
@@ -844,6 +849,7 @@ function importParsed(payload = {}) {
       const id = uid('p');
       try {
         insPort.run({
+          pos_x: null, pos_y: null,
           id, node_id: targetNode, port_number: Number(f.portNumber), protocol: f.protocol,
           service_name: f.serviceName || '', description: f.description || '', status: f.status,
           domain: f.domain || '', exposure: f.exposure, exposure_mode: f.exposureMode, scheme: f.scheme,
