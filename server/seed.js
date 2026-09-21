@@ -68,7 +68,7 @@ function buildSeed() {
 function seedIfEmpty() {
   if (!store.isEmpty()) return false;
   store.importAll(buildSeed());
-  console.log('[seed] inserted canonical inventory (9 nodes, 5 ports, 4 Cloudflare routes)');
+  console.log('[seed] inserted canonical inventory (10 nodes, 5 ports, 4 Cloudflare routes)');
   return true;
 }
 
