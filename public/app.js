@@ -80,7 +80,7 @@ async function lockEdit() {
 function applyLockState() {
   document.body.classList.toggle('locked', !canEdit());
   updateAuthBadge();
-  if (typeof network !== 'undefined' && network) network.setOptions({ interaction: { dragNodes: canEdit() } });
+  if (typeof network !== 'undefined' && network) network.setOptions({ interaction: { dragNodes: true } });
   const saveBtn = document.getElementById('btnSaveLayout');
   if (saveBtn) saveBtn.hidden = !(layoutDirty && canEdit());
   if (typeof renderDetail === 'function') renderDetail();   // re-render edit/delete affordances
@@ -418,6 +418,8 @@ function nodeColor(n) {
 /* selected node + its direct neighbours (containment parent/children + link endpoints) */
 function relatedIds(id) {
   const s = new Set([id]);
+  const port = state.ports.find(p => portGraphId(p) === id);
+  if (port) { s.add(port.nodeId); if (port.targetNodeId) s.add(port.targetNodeId); }
   const n = nodeById(id);
   if (n && n.parentId) s.add(n.parentId);
   state.nodes.forEach(x => { if (x.parentId === id) s.add(x.id); });
@@ -555,6 +557,50 @@ function buildEdges() {
 }
 function refreshEdges() { if (edgesDS) { edgesDS.clear(); edgesDS.add(buildEdges()); } startFlow(); }
 
+/* Place only intersecting rectangles. Stable ordering and a finite set of
+   boundary candidates avoid physics jitter and unbounded relaxation loops. */
+function separateGraphBoxes(boxes, moving = []) {
+  const movingSet = new Set(moving);
+  const placed = [];
+  const overlaps = (a, b) => a.x + a.right + 12 > b.x + b.left && b.x + b.right + 12 > a.x + a.left && a.y + a.bottom + 12 > b.y + b.top && b.y + b.bottom + 12 > a.y + a.top;
+  const sorted = boxes.slice().sort((a, b) => Number(movingSet.has(a.id)) - Number(movingSet.has(b.id)) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  for (const original of sorted) {
+    let box = { ...original };
+    if (placed.some(other => overlaps(box, other))) {
+      const candidates = placed.flatMap(other => [
+        { ...box, x: other.x + other.right + 12 - box.left },
+        { ...box, x: other.x + other.left - 12 - box.right },
+        { ...box, y: other.y + other.bottom + 12 - box.top },
+        { ...box, y: other.y + other.top - 12 - box.bottom },
+      ]);
+      candidates.sort((a, b) => Math.hypot(a.x - box.x, a.y - box.y) - Math.hypot(b.x - box.x, b.y - box.y));
+      // The outermost boundary always supplies a collision-free candidate.
+      box = candidates.find(candidate => placed.every(other => !overlaps(candidate, other)));
+    }
+    placed.push(box);
+  }
+  return placed;
+}
+function resolveGraphOverlaps(moving = []) {
+  const ids = nodesDS.getIds();
+  const positions = network.getPositions(ids);
+  const boxes = ids.map(id => {
+    const point = positions[id], bounds = network.getBoundingBox(id);
+    if (!point || !bounds || ![point.x, point.y, bounds.left, bounds.right, bounds.top, bounds.bottom].every(Number.isFinite)) return null;
+    return { id, x: point.x, y: point.y, left: bounds.left - point.x, right: bounds.right - point.x, top: bounds.top - point.y, bottom: bounds.bottom - point.y };
+  }).filter(Boolean);
+  const updates = [];
+  for (const box of separateGraphBoxes(boxes, moving)) {
+    const point = positions[box.id];
+    if (point.x === box.x && point.y === box.y) continue;
+    const item = String(box.id).startsWith('port:') ? state.ports.find(p => portGraphId(p) === box.id) : nodeById(box.id);
+    if (!item) continue;
+    item.posX = box.x; item.posY = box.y;
+    updates.push({ id: box.id, x: box.x, y: box.y });
+  }
+  if (updates.length) { markLayoutDirty(); nodesDS.update(updates); }
+}
+
 function buildGraph() {
   nodesDS = new vis.DataSet(graphNodes());
   edgesDS = new vis.DataSet(buildEdges());
@@ -563,17 +609,17 @@ function buildGraph() {
     autoResize: true,
     layout: { improvedLayout: true },
     physics: false,
-    interaction: { hover: true, dragNodes: canEdit(), dragView: true, zoomView: false, tooltipDelay: 120, navigationButtons: false, keyboard: false },
+    interaction: { hover: true, dragNodes: true, dragView: true, zoomView: false, tooltipDelay: 120, navigationButtons: false, keyboard: false },
     nodes: { chosen: true },
   });
   setupSmoothZoom(container);
-  network.on('afterDrawing', (ctx) => drawFlow(ctx));
+  network.on('afterDrawing', (ctx) => { resolveGraphOverlaps(); drawFlow(ctx); });
+  network.on('dragging', (params) => resolveGraphOverlaps(params.nodes));
   network.on('click', (params) => {
     if (params.nodes.length) select(params.nodes[0]);
     else { selectedId = null; focusSet = null; network.unselectAll(); syncGraph(); closeSidebar(); renderDetail(); markTableSelection(); }
   });
   network.on('dragEnd', (params) => {
-    if (!canEdit()) return;   // read-only: don't persist positions (dragNodes is also disabled)
     if (!params.nodes.length) return;
     params.nodes.forEach(id => {
       const pos = network.getPositions([id])[id];
@@ -582,6 +628,7 @@ function buildGraph() {
         : state.nodes.find(x => x.id === id);
       if (n && pos) { n.posX = Math.round(pos.x); n.posY = Math.round(pos.y); markLayoutDirty(); }
     });
+    resolveGraphOverlaps(params.nodes);
     syncGraph();
   });
   const graphEl = document.getElementById('graph');
@@ -758,7 +805,6 @@ function rgba(hex, a){ const [r,g,b]=hx(hex); return `rgba(${r},${g},${b},${a})`
 
 /* ================= SELECTION + DETAIL ================= */
 function select(id) {
-  if (String(id).startsWith('port:')) id = state.ports.find(p => portGraphId(p) === id)?.nodeId || id;
   selectedId = id;
   focusSet = relatedIds(id);
   syncGraph();
@@ -778,7 +824,8 @@ function closeSidebar() { mainEl.classList.remove('sidebar-open'); updateReopen(
 function updateReopen() {
   const btn = document.getElementById('panelReopen');
   const open = mainEl.classList.contains('sidebar-open');
-  const n = state.nodes.find(x => x.id === selectedId);
+  const port = state.ports.find(p => portGraphId(p) === selectedId);
+  const n = port ? { name: port.serviceName || `Port ${port.portNumber}` } : state.nodes.find(x => x.id === selectedId);
   btn.classList.toggle('show', !open && !!n);
   if (n) document.getElementById('panelReopenName').textContent = n.name;
 }
@@ -940,7 +987,7 @@ function renderTableRows() {
   body.innerHTML = rows.map(n => {
     const owned = state.ports.filter(p => p.nodeId === n.id);
     const portsCollapsed = tablePortsCollapsed.has(n.id);
-    const details = owned.map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.status)} · ${esc(exposureModeLabel(p))} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''}</div>`).join('');
+    const details = owned.map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.status)} · ${esc(exposureModeLabel(p))} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''} ${portOpenLink(n, p)}</div>`).join('');
     const portSummary = owned.length ? `<button type="button" class="port-toggle" data-port-collapse="${esc(n.id)}" aria-expanded="${String(!portsCollapsed)}">${portsCollapsed ? '▸' : '▾'} ${owned.length} owned port${owned.length === 1 ? '' : 's'}</button>` : '<span class="muted">No ports recorded</span>';
     return `<tr data-id="${esc(n.id)}" class="host-row">${tableRowHtml(n).replace(/^<tr[^>]*>|<\/tr>$/g, '')}</tr><tr class="port-details${portsCollapsed ? ' is-collapsed' : ''}" data-owner="${esc(n.id)}"><td colspan="7">${portSummary}${portsCollapsed ? '' : (details || '<span class="muted">No ports recorded</span>')}</td></tr>`;
   }).join('');
@@ -1022,8 +1069,26 @@ function clearSpinner(btn) {
   btn.disabled = false; btn.removeAttribute('aria-busy');
 }
 
+function portOpenLink(n, p) {
+  const url = portUrl(n, p);
+  return url ? `<a class="port-domain" href="${esc(url)}" target="_blank" rel="noopener noreferrer">Open ${esc(url)}</a>` : '';
+}
+function renderPortDetail(el, p) {
+  const owner = nodeById(p.nodeId);
+  const target = nodeById(p.targetNodeId);
+  const parent = owner && nodeById(owner.parentId);
+  el.innerHTML = `<div class="node-head"><h2>${esc(p.serviceName || 'service')}</h2>
+    <p>${p.portNumber}/${esc(p.protocol)} · ${esc(p.status)} · ${esc(p.exposure)} · ${esc(exposureModeLabel(p))}</p>
+    <p>${esc(p.description || '')}</p>${owner ? portOpenLink(owner, p) : ''}
+    <dl class="kv">${[['Owner', owner], ['Parent', parent], ['Target', target]].map(([label, n]) => n ? `<dt>${label}</dt><dd><button class="copy" data-goto="${esc(n.id)}">${esc(n.name)}</button></dd>` : '').join('')}
+    ${p.hostPort != null ? `<dt>Host port</dt><dd>${p.hostPort}</dd>` : ''}</dl></div>`;
+  el.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => gotoNode(b.dataset.goto)));
+}
+
 function renderDetail() {
   const el = document.getElementById('detail');
+  const selectedPort = state.ports.find(p => portGraphId(p) === selectedId);
+  if (selectedPort) { renderPortDetail(el, selectedPort); return; }
   const n = state.nodes.find(x => x.id === selectedId);
   if (!n) {
     el.innerHTML = `
@@ -1118,13 +1183,11 @@ function portsFor(nodeId) {
 function portUrl(n, p) {
   if (!['in_use', 'active', 'up'].includes(p.status)) return null;
   const scheme = p.scheme || inferScheme(p);
-  if (p.domain) return scheme + '://' + p.domain;
+  if (p.domain && p.exposureMode !== 'lan') return scheme + '://' + p.domain;
   const ip = (n.ipAddress || '').trim();
   return ip ? scheme + '://' + ip + ':' + p.portNumber : null;
 }
 function nodeUrl(n) {
-  const pub = portsFor(n.id).find(p => p.domain);
-  if (pub) return (pub.scheme || 'https') + '://' + pub.domain;
   const ip = (n.ipAddress || '').trim();
   return ip ? 'http://' + ip : null;
 }
@@ -1174,7 +1237,7 @@ function renderPortsSection(n) {
     return `
     <tr data-portid="${p.id}"${conflicted ? ' class="row-warn"' : ''}>
       <td><span class="port-num">${p.portNumber}</span><span class="proto">${esc(p.protocol)}</span></td>
-      <td class="svc">${esc(p.serviceName) || '<span style="color:var(--fg-dim)">unnamed</span>'}${p.description ? `<small>${esc(p.description)}</small>` : ''}${mapping}${p.domain ? `<a class="port-domain" href="${scheme}://${esc(p.domain)}" target="_blank" rel="noopener noreferrer" title="Open ${scheme}://${esc(p.domain)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>${esc(p.domain)}</a>` : ''}</td>
+      <td class="svc">${esc(p.serviceName) || '<span style="color:var(--fg-dim)">unnamed</span>'}${p.description ? `<small>${esc(p.description)}</small>` : ''}${mapping}${url && p.domain && p.exposureMode !== 'lan' ? `<a class="port-domain" href="${scheme}://${esc(p.domain)}" target="_blank" rel="noopener noreferrer" title="Open ${scheme}://${esc(p.domain)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>${esc(p.domain)}</a>` : ''}</td>
       <td>
         <span class="tag ${p.status === 'reserved' ? 'tag--reserved' : 'tag--use'}">${esc(p.status.replace('_', ' '))}</span>
         <span class="tag ${exp.cls}" title="${esc(exp.tip)}${p.domain ? ' — ' + esc(p.domain) : ''}">${exp.label}</span><span class="tag">${esc(exposureModeLabel(p))}</span>
