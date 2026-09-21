@@ -955,6 +955,11 @@ select.input {
 
 /* phone: collapse the inline search into an expandable bar */
 @media (max-width: 720px) {
+  .contract-badge { display: none; }
+  .brand { flex: 1 1 42%; max-width: 46%; }
+  .brand__title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toolbar { flex: 0 1 54%; max-width: 54vw; overflow-x: auto; scrollbar-width: none; }
+  .toolbar::-webkit-scrollbar { display: none; }
   .cmd { display: none; }
   .topbar-search-toggle { display: inline-flex; }
   .topbar.search-open .cmd {

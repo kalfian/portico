@@ -349,8 +349,8 @@ let tableQ = '';
 const tableCollapsed = new Set();
 const tablePortsCollapsed = new Set();
 let tableSort = (() => {
-  try { const s = JSON.parse(localStorage.getItem('hst-table-sort') || ''); if (s && s.key) return { key: s.key, dir: s.dir === 'desc' ? 'desc' : 'asc' }; } catch (e) {}
-  return { key: 'name', dir: 'asc' };
+  try { const s = JSON.parse(localStorage.getItem('hst-table-sort') || ''); if (s && s.key && s.key !== 'name') return { key: s.key, dir: s.dir === 'desc' ? 'desc' : 'asc' }; } catch (e) {}
+  return { key: 'hierarchy', dir: 'asc' };
 })();
 
 /* replace-in-place helpers for surgical local state updates after a mutation */
@@ -858,6 +858,7 @@ function filteredSortedNodes() {
   visit(null);
   const hierarchyRank = new Map(hierarchy.map((id, i) => [id, i]));
   rows = rows.slice().sort((a, b) => {
+    if (key === 'hierarchy') return ((hierarchyRank.get(a.id) ?? 99999) - (hierarchyRank.get(b.id) ?? 99999)) * sign;
     if (key === 'name' && dir === 'asc') return (hierarchyRank.get(a.id) ?? 99999) - (hierarchyRank.get(b.id) ?? 99999);
     const va = nodeSortValue(a, key), vb = nodeSortValue(b, key);
     let c;
