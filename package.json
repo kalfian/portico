@@ -6,8 +6,8 @@
   "type": "commonjs",
   "main": "server/index.js",
   "scripts": {
-    "dev": "node --watch server/index.js",
-    "start": "node server/index.js"
+    "dev": "PORT=3001 node --watch server/index.js",
+    "start": "PORT=3001 node server/index.js"
   },
   "engines": {
     "node": ">=20"
