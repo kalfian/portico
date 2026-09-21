@@ -1021,6 +1021,7 @@ function renderDetail() {
         </div>
         <div class="node-head__actions">
           ${canEdit() ? `<button class="btn btn--ghost btn--icon" title="Check this node's health" onclick="runProbeNode('${n.id}', this)" aria-label="Check health of ${esc(n.name)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 4 12 2-6h6"/></svg></button>
+          <button class="btn btn--ghost btn--icon" title="Attach child node" onclick="openNodeModal(null, '${n.id}')" aria-label="Attach child node to ${esc(n.name)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="3"/><circle cx="16" cy="16" r="3"/><path d="M10.2 10.2 13.8 13.8"/><path d="M8 3v2M3 8h2"/></svg></button>
           <button class="btn btn--ghost btn--icon" title="Edit node" onclick="openNodeModal('${n.id}')" aria-label="Edit node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>
           <button class="btn btn--ghost btn--icon btn--danger" title="Delete node" onclick="confirmDeleteNode('${n.id}')" aria-label="Delete node"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V6"/></svg></button>` : ''}
         </div>
@@ -1376,10 +1377,10 @@ document.addEventListener('keydown', (e) => {
 });
 
 /* ---- Node modal (add + edit) ---- */
-function openNodeModal(id = null) {
+function openNodeModal(id = null, initialParentId = null) {
   if (!requireEdit()) return;
   const editing = id ? state.nodes.find(n => n.id === id) : null;
-  const n = editing || { name:'', type:'physical', parentId:'', ipAddress:'', macAddress:'', os:'', role:'', status:'up', notes:'', networkId:null, iconType:'', iconValue:'' };
+  const n = editing || { name:'', type:'physical', parentId: initialParentId || '', ipAddress:'', macAddress:'', os:'', role:'', status:'up', notes:'', networkId:null, iconType:'', iconValue:'' };
   const typeOpts = TYPE_ORDER.map(k => `<option value="${k}" ${n.type===k?'selected':''}>${TYPES[k].label}</option>`).join('');
   const banned = editing ? descendantIds(id).add(id) : new Set();
   const parentOpts = ['<option value="">— none (root)</option>']
