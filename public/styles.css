@@ -100,6 +100,7 @@ body {
 
 /* stat strip — live topology counts */
 .statstrip { display: flex; align-items: stretch; gap: 0; margin-left: var(--sp-5); }
+.contract-badge { margin-left: var(--sp-3); align-self: center; padding: 5px 9px; border: 1px solid rgba(34,211,238,.24); border-radius: 999px; color: var(--cyan, #67e8f9); background: rgba(34,211,238,.08); font-size: 10px; letter-spacing: .04em; white-space: nowrap; }
 .stat {
   display: flex; flex-direction: column; align-items: flex-start; justify-content: center;
   padding: 0 var(--sp-4); border-left: 1px solid var(--border); line-height: 1.1;
@@ -694,6 +695,14 @@ select.input {
 .ntable th[aria-sort] .th-caret { opacity: 1; }
 .ntable th[aria-sort="descending"] .th-caret { transform: rotate(180deg); }
 .ntable tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; transition: background .1s; }
+.ntable tbody tr:hover {
+  cursor: pointer;
+}
+.port-details { display: none; background: rgba(15, 23, 42, .55); }
+.port-details:has(details[open]) { display: table-row; }
+.port-details td { padding: 8px 14px 10px 48px; color: var(--fg-muted); }
+.table-port-detail { padding: 3px 0; font-family: var(--mono); font-size: 11px; }
+.host-row.is-expanded + .port-details { display: table-row; }
 .ntable tbody tr:hover { background: var(--surface-2); }
 .ntable tbody tr:focus-visible { outline: none; background: var(--surface-2); box-shadow: inset 2px 0 0 var(--accent); }
 .ntable tbody tr.row-warn td:first-child { box-shadow: inset 2px 0 0 var(--down); }
@@ -704,6 +713,10 @@ select.input {
 .ntable .muted { color: var(--fg-dim); }
 .ncell-name { display: flex; align-items: center; gap: var(--sp-2); font-weight: 600; color: var(--fg); max-width: 260px; }
 .ncell-name .tv-name { overflow: hidden; text-overflow: ellipsis; }
+.tree-toggle, .tree-spacer { width: 18px; height: 18px; flex: 0 0 18px; display: inline-grid; place-items: center; }
+.tree-toggle { padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--fg-muted); cursor: pointer; font-size: 14px; line-height: 1; }
+.tree-toggle:hover { color: var(--fg); background: var(--surface-3); }
+.tree-toggle:focus-visible { outline: none; box-shadow: var(--focus); }
 .tv-avatar { width: 26px; height: 26px; flex-shrink: 0; border-radius: var(--r-sm); overflow: hidden; background: #eef2f7; display: grid; place-items: center; padding: 3px; border: 1px solid var(--border); }
 .tv-avatar img { width: 100%; height: 100%; object-fit: contain; }
 .tv-warn { display: inline-grid; place-items: center; color: var(--down); flex-shrink: 0; }

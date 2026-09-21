@@ -123,6 +123,9 @@ const EXP_ORDER = ['internal', 'lan', 'public'];
 
 /* ---- typed relationship links (non-containment) ---- */
 const LINK_TYPES = {
+  network:{ label: 'Network',color: '#60a5fa', dash: false },
+  virtualization:{ label: 'Virtualization',color: '#c084fc', dash: [3, 3] },
+  port_ownership:{ label: 'Port ownership',color: '#94a3b8', dash: [1, 3] },
   proxy:  { label: 'Proxy',  color: '#f0883e', dash: [6, 4] },
   mount:  { label: 'Mount',  color: '#a78bfa', dash: [2, 4] },
   dns:    { label: 'DNS',    color: '#2dd4bf', dash: [9, 4] },
@@ -331,7 +334,7 @@ function seedData() {
 }
 
 /* ================= STATE ================= */
-let state = { nodes: [], ports: [], networks: [], links: [] };
+let state = { nodes: [], ports: [], networks: [], links: [], cloudflareRoutes: [] };
 let selectedId = null;
 let portFilter = { proto: 'all', q: '' };
 let freeRange = { from: 8000, to: 9000, proto: 'tcp' };
@@ -339,6 +342,9 @@ let freeRange = { from: 8000, to: 9000, proto: 'tcp' };
 /* view + node-table UI prefs (persisted like the other localStorage prefs) */
 let currentView = (localStorage.getItem('hst-view') === 'table') ? 'table' : 'graph';
 let tableQ = '';
+// Table hierarchy is independent from port ownership: collapsing a node only
+// hides descendant nodes, never ports owned by another node.
+const tableCollapsed = new Set();
 let tableSort = (() => {
   try { const s = JSON.parse(localStorage.getItem('hst-table-sort') || ''); if (s && s.key) return { key: s.key, dir: s.dir === 'desc' ? 'desc' : 'asc' }; } catch (e) {}
   return { key: 'name', dir: 'asc' };
@@ -353,7 +359,7 @@ function replaceLink(l) { const i = state.links.findIndex(x => x.id === l.id); i
 /* refetch the whole topology (used after cascading server mutations: node/network delete, import, reset) */
 async function reloadState() {
   const topo = await api.topology();
-  state = { nodes: topo.nodes || [], ports: topo.ports || [], networks: topo.networks || [], links: topo.links || [] };
+  state = { nodes: topo.nodes || [], ports: topo.ports || [], networks: topo.networks || [], links: topo.links || [], cloudflareRoutes: topo.cloudflareRoutes || [] };
 }
 
 /* debounced position persistence for node drags */
@@ -369,7 +375,7 @@ function saveNodePosition(id) {
 /* ================= GRAPH ================= */
 let network, nodesDS, edgesDS;
 let colorBy = 'type';                                   // 'type' | 'network'
-const edgeToggles = { containment: true, proxy: true, mount: true, dns: true, custom: true };
+const edgeToggles = { containment: true, network: true, virtualization: true, port_ownership: true, proxy: true, mount: true, dns: true, custom: true };
 let focusSet = null;                                     // node ids emphasised in selection focus-mode
 
 /* node colour depends on the active "colour by" mode */
@@ -446,6 +452,20 @@ function nodeVis(n) {
     shapeProperties: { borderRadius: 9 },
   });
 }
+function portGraphId(p) { return 'port:' + p.id; }
+function portVis(p) {
+  const owner = nodeById(p.nodeId);
+  const exposure = EXPOSURE[p.exposure] || EXPOSURE.internal;
+  const domain = p.domain ? `\\n${p.domain}` : '';
+  const target = p.targetNodeId ? nodeById(p.targetNodeId) : null;
+  return {
+    id: portGraphId(p), label: `${p.serviceName || 'service'}\\n${p.portNumber}/${p.protocol} · ${exposure.label}${domain}${target ? `\\n→ ${target.name}` : ''}`,
+    shape: 'box', margin: 7, x: (owner?.posX || 0) + 40, y: (owner?.posY || 0) + 45,
+    color: { background: '#192532', border: exposure.label === 'public' ? '#f87171' : '#3b82f6', highlight: { background: '#22364a', border: '#67e8f9' } },
+    font: { color: '#dbeafe', size: 10, face: 'SFMono-Regular, monospace', multi: 'md' },
+    borderWidth: 1, shadow: { enabled: true, color: 'rgba(0,0,0,.3)', size: 6, x: 0, y: 2 },
+  };
+}
 function edgeVis(n) {
   const child = TYPES[n.type] || { color: '#39424f' };
   const parent = state.nodes.find(x => x.id === n.parentId);
@@ -478,13 +498,16 @@ function linkVis(lk) {
 function buildEdges() {
   const edges = [];
   if (edgeToggles.containment) state.nodes.filter(n => n.parentId).forEach(n => edges.push(edgeVis(n)));
+  if (edgeToggles.ports !== false) state.ports.forEach(p => {
+    if (nodeById(p.nodeId)) edges.push({ id: 'port-edge-' + p.id, from: p.nodeId, to: portGraphId(p), kind: 'port_ownership', label: 'owns', arrows: { to: { enabled: true, scaleFactor: .35 } }, dashes: [2, 3], color: { color: '#64748b', opacity: .8 }, font: { color: '#94a3b8', size: 9, face: 'monospace', strokeWidth: 3, strokeColor: '#0b0e14' } });
+  });
   state.links.forEach(lk => { if (edgeToggles[lk.type] !== false && nodeById(lk.fromNodeId) && nodeById(lk.toNodeId)) edges.push(linkVis(lk)); });
   return edges;
 }
 function refreshEdges() { if (edgesDS) { edgesDS.clear(); edgesDS.add(buildEdges()); } startFlow(); }
 
 function buildGraph() {
-  nodesDS = new vis.DataSet(state.nodes.map(nodeVis));
+  nodesDS = new vis.DataSet(state.nodes.map(nodeVis).concat(state.ports.map(portVis)));
   edgesDS = new vis.DataSet(buildEdges());
   const container = document.getElementById('graph');
   network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, {
@@ -780,9 +803,22 @@ function nodeSortValue(n, key) {
     default: return 0;
   }
 }
+function tableDepth(n) {
+  let depth = 0, seen = new Set(), parent = n.parentId ? nodeById(n.parentId) : null;
+  while (parent && !seen.has(parent.id)) { seen.add(parent.id); depth++; parent = parent.parentId ? nodeById(parent.parentId) : null; }
+  return depth;
+}
+function hasCollapsedTableAncestor(n) {
+  let parent = n.parentId ? nodeById(n.parentId) : null, seen = new Set();
+  while (parent && !seen.has(parent.id)) {
+    if (tableCollapsed.has(parent.id)) return true;
+    seen.add(parent.id); parent = parent.parentId ? nodeById(parent.parentId) : null;
+  }
+  return false;
+}
 function filteredSortedNodes() {
   const q = tableQ.trim().toLowerCase();
-  let rows = state.nodes;
+  let rows = state.nodes.filter(n => !hasCollapsedTableAncestor(n));
   if (q) {
     rows = rows.filter(n => {
       const nw = n.networkId ? nwById(n.networkId) : null;
@@ -814,8 +850,12 @@ function tableRowHtml(n) {
     ? (() => { const key = st.expRank === 3 ? 'public' : st.expRank === 2 ? 'lan' : 'internal'; const e = EXPOSURE[key]; return `<span class="tag ${e.cls}" title="${esc(e.tip)}">${e.label}</span>`; })()
     : '<span class="muted">—</span>';
   const cls = [hasConf ? 'row-warn' : '', selectedId === n.id ? 'is-selected' : ''].filter(Boolean).join(' ');
+  const hasChildren = state.nodes.some(x => x.parentId === n.id);
+  const collapsed = tableCollapsed.has(n.id);
+  const indent = tableDepth(n) * 18;
   return `<tr data-id="${n.id}" tabindex="0" role="button" aria-label="Open ${esc(n.name)}"${cls ? ` class="${cls}"` : ''}>
-    <td><div class="ncell-name">
+    <td><div class="ncell-name" style="padding-left:${indent}px">
+      ${hasChildren ? `<button type="button" class="tree-toggle" data-collapse="${esc(n.id)}" aria-label="${collapsed ? 'Expand' : 'Collapse'} ${esc(n.name)}" aria-expanded="${String(!collapsed)}"><span>${collapsed ? '▸' : '▾'}</span></button>` : '<span class="tree-spacer"></span>'}
       ${src ? `<span class="tv-avatar"><img src="${esc(src)}" alt="" onerror="this.closest('.tv-avatar').style.display='none'"></span>` : ''}
       <span class="tv-name">${esc(n.name)}</span>
       ${hasConf ? `<span class="tv-warn" title="This node has a conflict">${WARN_ICON}</span>` : ''}
@@ -835,7 +875,11 @@ function renderTableRows() {
   if (!body) return;
   const rows = filteredSortedNodes();
   const total = state.nodes.length;
-  body.innerHTML = rows.map(tableRowHtml).join('');
+  body.innerHTML = rows.map(n => {
+    const details = state.ports.filter(p => p.nodeId === n.id).map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''}</div>`).join('');
+    return `<tr data-id="${esc(n.id)}" class="host-row">${tableRowHtml(n).replace(/^<tr[^>]*>|<\/tr>$/g, '')}</tr><tr class="port-details" data-owner="${esc(n.id)}"><td colspan="7"><details><summary>${state.ports.filter(p => p.nodeId === n.id).length} owned port(s)</summary>${details || '<span class="muted">No ports recorded</span>'}</details></td></tr>`;
+  }).join('');
+  body.querySelectorAll('.host-row').forEach(row => row.addEventListener('click', () => row.classList.toggle('is-expanded')));
   const tableEl = document.querySelector('#tableView table.ntable');
   if (tableEl) tableEl.style.display = rows.length ? '' : 'none';
   // empty states
@@ -2362,7 +2406,11 @@ document.getElementById('viewToggle').addEventListener('click', (e) => {
   const body = document.getElementById('tableBody');
   if (body) {
     const activate = (tr) => { const id = tr.dataset.id; if (id) select(id); };
-    body.addEventListener('click', (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) activate(tr); });
+    body.addEventListener('click', (e) => {
+      const toggle = e.target.closest('[data-collapse]');
+      if (toggle) { e.stopPropagation(); const id = toggle.dataset.collapse; if (tableCollapsed.has(id)) tableCollapsed.delete(id); else tableCollapsed.add(id); renderTable(); return; }
+      const tr = e.target.closest('tr[data-id]'); if (tr) activate(tr);
+    });
     body.addEventListener('keydown', (e) => {
       const tr = e.target.closest('tr[data-id]'); if (!tr) return;
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(tr); }
@@ -2625,7 +2673,7 @@ async function boot() {
   await refreshAuthStatus();
   try {
     const topo = await api.topology();
-    state = { nodes: topo.nodes || [], ports: topo.ports || [], networks: topo.networks || [], links: topo.links || [] };
+    state = { nodes: topo.nodes || [], ports: topo.ports || [], networks: topo.networks || [], links: topo.links || [], cloudflareRoutes: topo.cloudflareRoutes || [] };
   } catch (e) {
     toast('Failed to load topology: ' + e.message, 'err');
   }
