@@ -81,6 +81,8 @@ function applyLockState() {
   document.body.classList.toggle('locked', !canEdit());
   updateAuthBadge();
   if (typeof network !== 'undefined' && network) network.setOptions({ interaction: { dragNodes: canEdit() } });
+  const saveBtn = document.getElementById('btnSaveLayout');
+  if (saveBtn) saveBtn.hidden = !(layoutDirty && canEdit());
   if (typeof renderDetail === 'function') renderDetail();   // re-render edit/delete affordances
 }
 function updateAuthBadge() {
@@ -345,6 +347,7 @@ let tableQ = '';
 // Table hierarchy is independent from port ownership: collapsing a node only
 // hides descendant nodes, never ports owned by another node.
 const tableCollapsed = new Set();
+const tablePortsCollapsed = new Set();
 let tableSort = (() => {
   try { const s = JSON.parse(localStorage.getItem('hst-table-sort') || ''); if (s && s.key) return { key: s.key, dir: s.dir === 'desc' ? 'desc' : 'asc' }; } catch (e) {}
   return { key: 'name', dir: 'asc' };
@@ -362,14 +365,28 @@ async function reloadState() {
   state = { nodes: topo.nodes || [], ports: topo.ports || [], networks: topo.networks || [], links: topo.links || [], cloudflareRoutes: topo.cloudflareRoutes || [] };
 }
 
-/* debounced position persistence for node drags */
-const _posSaveTimers = {};
-function saveNodePosition(id) {
-  clearTimeout(_posSaveTimers[id]);
-  _posSaveTimers[id] = setTimeout(() => {
-    const n = nodeById(id); if (!n) return;
-    api.updateNode(id, { posX: n.posX, posY: n.posY }).catch(e => toast('Could not save position: ' + e.message, 'err'));
-  }, 500);
+/* Dragging is a local draft. Positions become durable only after an
+   authenticated user explicitly presses Save layout. */
+let layoutDirty = false;
+function markLayoutDirty() {
+  layoutDirty = true;
+  const btn = document.getElementById('btnSaveLayout');
+  if (btn) btn.hidden = !canEdit();
+}
+async function saveLayout() {
+  if (!requireEdit() || !layoutDirty) return;
+  const btn = document.getElementById('btnSaveLayout');
+  if (btn) { btn.disabled = true; btn.setAttribute('aria-busy', 'true'); }
+  try {
+    await Promise.all(state.nodes.map(n => api.updateNode(n.id, { posX: n.posX, posY: n.posY })));
+    layoutDirty = false;
+    if (btn) btn.hidden = true;
+    toast('Layout saved', 'ok');
+  } catch (e) {
+    toast('Could not save layout: ' + e.message, 'err');
+  } finally {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); }
+  }
 }
 
 /* ================= GRAPH ================= */
@@ -469,7 +486,7 @@ function portVis(p) {
   const start = -((Math.max(owned.length, 1) - 1) * gap) / 2;
   return {
     id: portGraphId(p), label: `${p.serviceName || 'service'}\\n${p.portNumber}/${p.protocol} · ${exposure.label}${domain}${target ? `\\n→ ${target.name}` : ''}`,
-    shape: 'box', margin: 7, x: (owner?.posX || 0) + start + index * gap, y: (owner?.posY || 0) + 105,
+    shape: 'box', margin: 7, x: (owner?.posX || 0) + start + index * gap, y: (owner?.posY || 0) + 135,
     color: { background: '#192532', border: exposure.label === 'public' ? '#f87171' : '#3b82f6', highlight: { background: '#22364a', border: '#67e8f9' } },
     font: { color: '#dbeafe', size: 10, face: 'SFMono-Regular, monospace', multi: 'md' },
     borderWidth: 1, shadow: { enabled: true, color: 'rgba(0,0,0,.3)', size: 6, x: 0, y: 2 },
@@ -538,7 +555,7 @@ function buildGraph() {
     params.nodes.forEach(id => {
       const pos = network.getPositions([id])[id];
       const n = state.nodes.find(x => x.id === id);
-      if (n && pos) { n.posX = Math.round(pos.x); n.posY = Math.round(pos.y); saveNodePosition(id); }
+      if (n && pos) { n.posX = Math.round(pos.x); n.posY = Math.round(pos.y); markLayoutDirty(); }
     });
   });
   const graphEl = document.getElementById('graph');
@@ -687,15 +704,14 @@ function autoArrange() {
   network.setOptions({ layout: { hierarchical: { enabled: true, direction: 'UD', sortMethod: 'directed', levelSeparation: 150, nodeSpacing: 150, treeSpacing: 180 } } });
   network.once('afterDrawing', async () => {
     const pos = network.getPositions();
-    const updates = [];
     state.nodes.forEach(n => {
-      if (pos[n.id]) { n.posX = Math.round(pos[n.id].x); n.posY = Math.round(pos[n.id].y); updates.push(api.updateNode(n.id, { posX: n.posX, posY: n.posY })); }
+      if (pos[n.id]) { n.posX = Math.round(pos[n.id].x); n.posY = Math.round(pos[n.id].y); }
     });
     network.setOptions({ layout: { hierarchical: { enabled: false } } });
     syncGraph();
+    markLayoutDirty();
     setTimeout(() => network.fit({ animation: { duration: 350 } }), 30);
-    try { await Promise.all(updates); toast('Layout arranged', 'ok'); }
-    catch (e) { toast('Some positions failed to save: ' + e.message, 'err'); }
+    toast('Layout preview ready — press Save layout to persist it', 'ok');
   });
 }
 
@@ -837,7 +853,12 @@ function filteredSortedNodes() {
   }
   const { key, dir } = tableSort;
   const sign = dir === 'desc' ? -1 : 1;
+  const hierarchy = [];
+  const visit = (parentId) => state.nodes.filter(x => (x.parentId || null) === parentId).forEach(x => { hierarchy.push(x.id); visit(x.id); });
+  visit(null);
+  const hierarchyRank = new Map(hierarchy.map((id, i) => [id, i]));
   rows = rows.slice().sort((a, b) => {
+    if (key === 'name' && dir === 'asc') return (hierarchyRank.get(a.id) ?? 99999) - (hierarchyRank.get(b.id) ?? 99999);
     const va = nodeSortValue(a, key), vb = nodeSortValue(b, key);
     let c;
     if (typeof va === 'string' || typeof vb === 'string') c = String(va).localeCompare(String(vb));
@@ -885,10 +906,13 @@ function renderTableRows() {
   const rows = filteredSortedNodes();
   const total = state.nodes.length;
   body.innerHTML = rows.map(n => {
-    const details = state.ports.filter(p => p.nodeId === n.id).map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''}</div>`).join('');
-    return `<tr data-id="${esc(n.id)}" class="host-row">${tableRowHtml(n).replace(/^<tr[^>]*>|<\/tr>$/g, '')}</tr><tr class="port-details" data-owner="${esc(n.id)}"><td colspan="7"><details><summary>${state.ports.filter(p => p.nodeId === n.id).length} owned port(s)</summary>${details || '<span class="muted">No ports recorded</span>'}</details></td></tr>`;
+    const owned = state.ports.filter(p => p.nodeId === n.id);
+    const portsCollapsed = tablePortsCollapsed.has(n.id);
+    const details = owned.map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''}</div>`).join('');
+    const portSummary = owned.length ? `<button type="button" class="port-toggle" data-port-collapse="${esc(n.id)}" aria-expanded="${String(!portsCollapsed)}">${portsCollapsed ? '▸' : '▾'} ${owned.length} owned port${owned.length === 1 ? '' : 's'}</button>` : '<span class="muted">No ports recorded</span>';
+    return `<tr data-id="${esc(n.id)}" class="host-row">${tableRowHtml(n).replace(/^<tr[^>]*>|<\/tr>$/g, '')}</tr><tr class="port-details${portsCollapsed ? ' is-collapsed' : ''}" data-owner="${esc(n.id)}"><td colspan="7">${portSummary}${portsCollapsed ? '' : (details || '<span class="muted">No ports recorded</span>')}</td></tr>`;
   }).join('');
-  body.querySelectorAll('.host-row').forEach(row => row.addEventListener('click', () => row.classList.toggle('is-expanded')));
+  body.querySelectorAll('.host-row').forEach(row => row.addEventListener('click', (e) => { if (!e.target.closest('button')) row.classList.toggle('is-expanded'); }));
   const tableEl = document.querySelector('#tableView table.ntable');
   if (tableEl) tableEl.style.display = rows.length ? '' : 'none';
   // empty states
@@ -2416,6 +2440,8 @@ document.getElementById('viewToggle').addEventListener('click', (e) => {
   if (body) {
     const activate = (tr) => { const id = tr.dataset.id; if (id) select(id); };
     body.addEventListener('click', (e) => {
+      const portToggle = e.target.closest('[data-port-collapse]');
+      if (portToggle) { e.stopPropagation(); const id = portToggle.dataset.portCollapse; if (tablePortsCollapsed.has(id)) tablePortsCollapsed.delete(id); else tablePortsCollapsed.add(id); renderTable(); return; }
       const toggle = e.target.closest('[data-collapse]');
       if (toggle) { e.stopPropagation(); const id = toggle.dataset.collapse; if (tableCollapsed.has(id)) tableCollapsed.delete(id); else tableCollapsed.add(id); renderTable(); return; }
       const tr = e.target.closest('tr[data-id]'); if (tr) activate(tr);
@@ -2432,7 +2458,8 @@ document.getElementById('btnProbe').addEventListener('click', (e) => runProbeAll
 document.getElementById('btnImportSource').addEventListener('click', openImportModal);
 document.getElementById('btnAddNode').addEventListener('click', () => openNodeModal());
 document.getElementById('btnArrange').addEventListener('click', autoArrange);
-document.getElementById('btnFit').addEventListener('click', () => network.fit({ animation: REDUCE ? false : { duration: 420, easingFunction: 'easeInOutCubic' } }));
+document.getElementById('btnSaveLayout').addEventListener('click', saveLayout);
+document.getElementById('btnFit').addEventListener('click', () => network.fit({ padding: 80, animation: REDUCE ? false : { duration: 420, easingFunction: 'easeInOutCubic' } }));
 document.getElementById('btnZoomIn').addEventListener('click', () => smoothZoomBy(1.35));
 document.getElementById('btnZoomOut').addEventListener('click', () => smoothZoomBy(1 / 1.35));
 document.getElementById('panelCollapse').addEventListener('click', () => closeSidebar());
