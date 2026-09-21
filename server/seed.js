@@ -54,6 +54,9 @@ function buildSeed() {
   const links = nodes.filter(n => n.id !== mtk).map(n => ({
     id: `lk-mtk-${n.id}`, fromNodeId: mtk, toNodeId: n.id, type: 'network', label: 'servers LAN',
   }));
+  for (const n of nodes.filter(n => n.type === 'lxc' || n.type === 'vm')) {
+    links.push({ id: `lk-world-${n.id}`, fromNodeId: world, toNodeId: n.id, type: 'virtualization', label: 'virtualization' });
+  }
   return {
     contract: 'portico.topology.v1',
     nodes, ports,

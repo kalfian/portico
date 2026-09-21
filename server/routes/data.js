@@ -22,10 +22,17 @@ router.get('/topology', wrap((req, res) => {
 
   const edges = [];
   for (const n of nodes) {
-    if (n.parentId) edges.push({ id: `edge-${n.parentId}-${n.id}`, from: n.parentId, to: n.id, kind: 'containment' });
+    if (n.parentId) {
+      const parent = nodes.find((candidate) => candidate.id === n.parentId);
+      const virtualization = parent && parent.type === 'proxmox_host' && (n.type === 'vm' || n.type === 'lxc');
+      edges.push({ id: `edge-${n.parentId}-${n.id}`, from: n.parentId, to: n.id, kind: virtualization ? 'virtualization' : 'containment', type: virtualization ? 'virtualization' : 'containment' });
+    }
   }
   for (const l of links) {
-    edges.push({ id: l.id, from: l.fromNodeId, to: l.toNodeId, kind: 'link', type: l.type, label: l.label });
+    edges.push({ id: l.id, from: l.fromNodeId, to: l.toNodeId, kind: l.type, type: l.type, label: l.label });
+  }
+  for (const p of ports) {
+    edges.push({ id: `edge-port-${p.id}`, from: p.nodeId, to: p.id, kind: 'port_ownership', type: 'port_ownership', label: `${p.protocol}/${p.portNumber}` });
   }
 
   res.json({ contract: 'portico.topology.v1', nodes, ports, networks, links, cloudflareRoutes, edges });
