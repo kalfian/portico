@@ -9,7 +9,6 @@ function buildSeed() {
   const mtk = 'n-mtk';
   const world = 'n-world';
   const nas = 'n-nas';
-  const ppHost = 'n-pp-host';
   const lxcRoles = {
     101: 'Tailscale subnet router',
     102: 'Portico',
@@ -29,7 +28,6 @@ function buildSeed() {
       tags: ['proxmox', 'lxc', role.toLowerCase()], notes: `Canonical Proxmox LXC ${vmid}.`, posX: -240 + i * 120, posY: 220, networkId: 'nw-srv',
     })),
     { id: nas, name: 'NAS', type: 'physical', parentId: mtk, ipAddress: '10.20.30.11', role: 'NAS / storage', status: 'up', source: 'manual', tags: ['storage', 'manual'], notes: 'Canonical manually maintained NAS host.', posX: 300, posY: 0, networkId: 'nw-srv' },
-    { id: ppHost, name: 'pp host', type: 'physical', parentId: mtk, ipAddress: '10.20.30.106', role: 'Portainer / application host', status: 'up', source: 'manual', tags: ['apps', 'manual'], notes: 'Canonical host for pp.kalfian.com.', posX: 560, posY: 0, networkId: 'nw-srv' },
   ];
   const P = (nodeId, portNumber, serviceName, description, domain, target) => ({
     id: `p-${nodeId}-${portNumber}`, nodeId, portNumber, protocol: 'tcp', serviceName, description,
@@ -37,12 +35,13 @@ function buildSeed() {
     cloudflareRouteId: domain ? `cf-${serviceName === 'couchdb' ? 'cdb' : serviceName}` : null,
     source: domain ? 'cloudflare' : 'manual', notes: domain ? 'Verified Cloudflare route.' : '',
   });
+  const lxc106 = 'n-world-lxc-106';
   const ports = [
     { id: 'p-mtk-22', nodeId: mtk, portNumber: 22, protocol: 'tcp', serviceName: 'ssh', description: 'Management SSH', status: 'in_use', domain: '', exposure: 'internal', scheme: 'http', source: 'manual' },
     P(nas, 8080, 'vw', 'Verified Cloudflare route target', 'vw.kalfian.com'),
     P(nas, 3010, 'affine', 'Verified Cloudflare route target', 'affine.kalfian.com'),
     P(nas, 5984, 'couchdb', 'Verified Cloudflare route target', 'cdb.kalfian.com'),
-    P(ppHost, 1111, 'pp', 'Verified Cloudflare route target', 'pp.kalfian.com'),
+    P(lxc106, 1111, 'pp', 'Verified Cloudflare route target', 'pp.kalfian.com'),
   ];
   const cloudflareRoutes = [
     { id: 'cf-vw', hostname: 'vw.kalfian.com', target: 'http://10.20.30.11:8080', targetHost: '10.20.30.11', targetPort: 8080, exposure: 'public', source: 'cloudflare', notes: 'Verified route.' },
