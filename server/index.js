@@ -9,7 +9,7 @@ const { seedIfEmpty } = require('./seed');
 const { authenticate } = require('./auth');
 const { ApiError } = require('./lib/util');
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = process.env.PORT === undefined ? 3001 : Number(process.env.PORT);
 const HOST = process.env.HOST || '0.0.0.0';
 // Signs the session cookie. Set SESSION_SECRET in any real deployment.
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-home-topology';
@@ -70,7 +70,7 @@ app.use((err, req, res, next) => {
 });
 
 const server = app.listen(PORT, HOST, () => {
-  console.log(`[server] Home Server Topology API listening on http://${HOST}:${PORT}`);
+  console.log(`[server] Home Server Topology API listening on http://${HOST}:${server.address().port}`);
 });
 
 // Graceful shutdown for Docker / nodemon.

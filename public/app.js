@@ -354,7 +354,7 @@ let tableSort = (() => {
 })();
 
 /* replace-in-place helpers for surgical local state updates after a mutation */
-function replaceNode(n) { const i = state.nodes.findIndex(x => x.id === n.id); if (i >= 0) state.nodes[i] = n; else state.nodes.push(n); }
+function replaceNode(n) { const draft = state.nodes.find(x => x.id === n.id); if (layoutDirty && draft) { n.posX = draft.posX; n.posY = draft.posY; } const i = state.nodes.findIndex(x => x.id === n.id); if (i >= 0) state.nodes[i] = n; else state.nodes.push(n); }
 function replacePort(p) { const i = state.ports.findIndex(x => x.id === p.id); if (i >= 0) state.ports[i] = p; else state.ports.push(p); }
 function replaceNetwork(w) { const i = state.networks.findIndex(x => x.id === w.id); if (i >= 0) state.networks[i] = w; else state.networks.push(w); }
 function replaceLink(l) { const i = state.links.findIndex(x => x.id === l.id); if (i >= 0) state.links[i] = l; else state.links.push(l); }
@@ -422,7 +422,7 @@ function nodeVis(n) {
   const border = col;
   const bg = mix(col, '#0b0e14', dim ? 0.88 : 0.82);
   const ip = (n.ipAddress || '').trim();
-  const inUse = portsFor(n.id).filter(p => p.status === 'in_use').sort((a, b) => a.portNumber - b.portNumber);
+  const inUse = portsFor(n.id).filter(p => ['in_use', 'active', 'up'].includes(p.status)).sort((a, b) => a.portNumber - b.portNumber);
   const portsLine = inUse.length
     ? inUse.slice(0, 4).map(p => ':' + p.portNumber).join(' ') + (inUse.length > 4 ? ' +' + (inUse.length - 4) : '')
     : '';
@@ -472,11 +472,21 @@ function nodeVis(n) {
     shapeProperties: { borderRadius: 9 },
   });
 }
+function exposureModeLabel(p) { return (p.exposureMode || (p.domain || p.cloudflareRouteId ? 'cloudflare' : 'lan')) === 'cloudflare' ? 'Cloudflare tunnel/domain' : 'LAN/IP-only'; }
+function graphNodes() {
+  return state.nodes.filter(n => !hasCollapsedTableAncestor(n)).map(nodeVis)
+    .concat(state.ports.filter(p => edgeToggles.port_ownership !== false && !tablePortsCollapsed.has(p.nodeId) && nodeById(p.nodeId) && !hasCollapsedTableAncestor(nodeById(p.nodeId))).map(portVis));
+}
+function toggleNodeSection(id, ports) {
+  const collapsed = ports ? tablePortsCollapsed : tableCollapsed;
+  if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
+  syncGraph(); renderTable(); renderDetail();
+}
 function portGraphId(p) { return 'port:' + p.id; }
 function portVis(p) {
   const owner = nodeById(p.nodeId);
   const exposure = EXPOSURE[p.exposure] || EXPOSURE.internal;
-  const domain = p.domain ? `\\n${p.domain}` : '';
+  const domain = p.domain ? `\n${p.domain}` : '';
   const target = p.targetNodeId ? nodeById(p.targetNodeId) : null;
   // Spread owned ports into a compact row below the owner. Without this,
   // every port inherited the same offset and rendered as one unreadable stack.
@@ -485,7 +495,7 @@ function portVis(p) {
   const gap = 145;
   const start = -((Math.max(owned.length, 1) - 1) * gap) / 2;
   return {
-    id: portGraphId(p), label: `${p.serviceName || 'service'}\\n${p.portNumber}/${p.protocol} · ${exposure.label}${domain}${target ? `\\n→ ${target.name}` : ''}`,
+    id: portGraphId(p), label: `${p.serviceName || 'service'}\n${p.portNumber}/${p.protocol} · ${exposure.label} · ${p.status}\n${exposureModeLabel(p)}${domain}${target ? `\n→ ${target.name}` : ''}`,
     shape: 'box', margin: 7, x: (owner?.posX || 0) + start + index * gap, y: (owner?.posY || 0) + 135,
     color: { background: '#192532', border: exposure.label === 'public' ? '#f87171' : '#3b82f6', highlight: { background: '#22364a', border: '#67e8f9' } },
     font: { color: '#dbeafe', size: 10, face: 'SFMono-Regular, monospace', multi: 'md' },
@@ -524,16 +534,17 @@ function linkVis(lk) {
 function buildEdges() {
   const edges = [];
   if (edgeToggles.containment) state.nodes.filter(n => n.parentId).forEach(n => edges.push(edgeVis(n)));
-  if (edgeToggles.ports !== false) state.ports.forEach(p => {
+  if (edgeToggles.port_ownership !== false) state.ports.forEach(p => {
     if (nodeById(p.nodeId)) edges.push({ id: 'port-edge-' + p.id, from: p.nodeId, to: portGraphId(p), kind: 'port_ownership', label: 'owns', arrows: { to: { enabled: true, scaleFactor: .35 } }, dashes: [2, 3], color: { color: '#64748b', opacity: .8 }, font: { color: '#94a3b8', size: 9, face: 'monospace', strokeWidth: 3, strokeColor: '#0b0e14' } });
   });
   state.links.forEach(lk => { if (edgeToggles[lk.type] !== false && nodeById(lk.fromNodeId) && nodeById(lk.toNodeId)) edges.push(linkVis(lk)); });
-  return edges;
+  const visible = new Set(graphNodes().map(n => n.id));
+  return edges.filter(e => visible.has(e.from) && visible.has(e.to));
 }
 function refreshEdges() { if (edgesDS) { edgesDS.clear(); edgesDS.add(buildEdges()); } startFlow(); }
 
 function buildGraph() {
-  nodesDS = new vis.DataSet(state.nodes.map(nodeVis).concat(state.ports.map(portVis)));
+  nodesDS = new vis.DataSet(graphNodes());
   edgesDS = new vis.DataSet(buildEdges());
   const container = document.getElementById('graph');
   network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, {
@@ -557,6 +568,7 @@ function buildGraph() {
       const n = state.nodes.find(x => x.id === id);
       if (n && pos) { n.posX = Math.round(pos.x); n.posY = Math.round(pos.y); markLayoutDirty(); }
     });
+    syncGraph();
   });
   const graphEl = document.getElementById('graph');
   if (!REDUCE) {
@@ -688,14 +700,14 @@ function smoothZoomBy(factor) {
 }
 
 function syncGraph() {
-  nodesDS.clear(); nodesDS.add(state.nodes.map(nodeVis));
+  nodesDS.clear(); nodesDS.add(graphNodes());
   edgesDS.clear(); edgesDS.add(buildEdges());
-  if (selectedId && state.nodes.some(n => n.id === selectedId)) network.selectNodes([selectedId]);
+  if (selectedId && nodesDS.get(selectedId)) network.selectNodes([selectedId]);
 }
 
 function refreshGraphNode(id) {
   const n = state.nodes.find(x => x.id === id);
-  if (n && nodesDS) nodesDS.update(nodeVis(n));
+  if (n && nodesDS && nodesDS.get(id)) nodesDS.update(nodeVis(n));
 }
 
 /* auto-arrange: run hierarchical once, capture positions, persist to server, revert to manual */
@@ -728,6 +740,7 @@ function rgba(hex, a){ const [r,g,b]=hx(hex); return `rgba(${r},${g},${b},${a})`
 
 /* ================= SELECTION + DETAIL ================= */
 function select(id) {
+  if (String(id).startsWith('port:')) id = state.ports.find(p => portGraphId(p) === id)?.nodeId || id;
   selectedId = id;
   focusSet = relatedIds(id);
   syncGraph();
@@ -795,7 +808,7 @@ function nodePortStats(id) {
   for (const p of state.ports) {
     if (p.nodeId !== id) continue;
     total++;
-    if (p.status === 'in_use') inUse++;
+    if (['in_use', 'active', 'up'].includes(p.status)) inUse++;
     const r = EXP_RANK[p.exposure] || 0;
     if (r > expRank) expRank = r;
   }
@@ -909,7 +922,7 @@ function renderTableRows() {
   body.innerHTML = rows.map(n => {
     const owned = state.ports.filter(p => p.nodeId === n.id);
     const portsCollapsed = tablePortsCollapsed.has(n.id);
-    const details = owned.map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''}</div>`).join('');
+    const details = owned.map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.status)} · ${esc(exposureModeLabel(p))} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''}</div>`).join('');
     const portSummary = owned.length ? `<button type="button" class="port-toggle" data-port-collapse="${esc(n.id)}" aria-expanded="${String(!portsCollapsed)}">${portsCollapsed ? '▸' : '▾'} ${owned.length} owned port${owned.length === 1 ? '' : 's'}</button>` : '<span class="muted">No ports recorded</span>';
     return `<tr data-id="${esc(n.id)}" class="host-row">${tableRowHtml(n).replace(/^<tr[^>]*>|<\/tr>$/g, '')}</tr><tr class="port-details${portsCollapsed ? ' is-collapsed' : ''}" data-owner="${esc(n.id)}"><td colspan="7">${portSummary}${portsCollapsed ? '' : (details || '<span class="muted">No ports recorded</span>')}</td></tr>`;
   }).join('');
@@ -1053,8 +1066,12 @@ function renderDetail() {
       <dl class="dl">
         <dt>MAC</dt><dd class="mono ${n.macAddress?'':'muted'}">${n.macAddress ? `<button class="copy mono" data-copy="${esc(n.macAddress)}" title="Copy">${esc(n.macAddress)}</button>` : '—'}</dd>
         <dt>OS</dt><dd class="${n.os?'':'muted'}">${esc(n.os) || '—'}</dd>
+        <dt>Visibility</dt><dd>
+          <button class="copy" onclick="toggleNodeSection('${n.id}', false)" aria-expanded="${!tableCollapsed.has(n.id)}">${tableCollapsed.has(n.id) ? 'Expand' : 'Collapse'} children (${kids.length})</button>
+          <button class="copy" onclick="toggleNodeSection('${n.id}', true)" aria-expanded="${!tablePortsCollapsed.has(n.id)}">${tablePortsCollapsed.has(n.id) ? 'Expand' : 'Collapse'} owned ports (${portsFor(n.id).length})</button>
+        </dd>
         <dt>Parent</dt><dd>${parent ? `<button class="copy" data-goto="${parent.id}">${esc(parent.name)}</button>` : '<span class="muted">— root</span>'}</dd>
-        ${kids.length ? `<dt>Children</dt><dd>${kids.map(k=>`<button class="copy" data-goto="${k.id}">${esc(k.name)}</button>`).join(', ')}</dd>` : ''}
+        ${kids.length ? `<dt>Children</dt><dd>${tableCollapsed.has(n.id) ? `${kids.length} children collapsed` : kids.map(k=>`<button class="copy" data-goto="${k.id}">${esc(k.name)}</button>`).join(', ')}</dd>` : ''}
         <dt>Last seen</dt><dd class="${relativeTime(n.lastSeen) ? '' : 'muted'}">${(() => { const rel = relativeTime(n.lastSeen); return rel ? `<span class="seen-dot ${freshnessClass(n.lastSeen)}"></span>${esc(rel)}<span class="seen-abs"> · ${esc(absTime(n.lastSeen))}</span>` : 'never probed'; })()}</dd>
       </dl>
       ${n.notes ? `<div class="notes">${esc(n.notes)}</div>` : ''}
@@ -1081,7 +1098,7 @@ function portsFor(nodeId) {
     .sort((a,b) => a.portNumber - b.portNumber || a.protocol.localeCompare(b.protocol));
 }
 function portUrl(n, p) {
-  if (p.status !== 'in_use') return null;
+  if (!['in_use', 'active', 'up'].includes(p.status)) return null;
   const scheme = p.scheme || inferScheme(p);
   if (p.domain) return scheme + '://' + p.domain;
   const ip = (n.ipAddress || '').trim();
@@ -1141,8 +1158,8 @@ function renderPortsSection(n) {
       <td><span class="port-num">${p.portNumber}</span><span class="proto">${esc(p.protocol)}</span></td>
       <td class="svc">${esc(p.serviceName) || '<span style="color:var(--fg-dim)">unnamed</span>'}${p.description ? `<small>${esc(p.description)}</small>` : ''}${mapping}${p.domain ? `<a class="port-domain" href="${scheme}://${esc(p.domain)}" target="_blank" rel="noopener noreferrer" title="Open ${scheme}://${esc(p.domain)}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18"/></svg>${esc(p.domain)}</a>` : ''}</td>
       <td>
-        <span class="tag ${p.status === 'reserved' ? 'tag--reserved' : 'tag--use'}">${p.status === 'reserved' ? 'reserved' : 'in use'}</span>
-        <span class="tag ${exp.cls}" title="${esc(exp.tip)}${p.domain ? ' — ' + esc(p.domain) : ''}">${exp.label}</span>
+        <span class="tag ${p.status === 'reserved' ? 'tag--reserved' : 'tag--use'}">${esc(p.status.replace('_', ' '))}</span>
+        <span class="tag ${exp.cls}" title="${esc(exp.tip)}${p.domain ? ' — ' + esc(p.domain) : ''}">${exp.label}</span><span class="tag">${esc(exposureModeLabel(p))}</span>
         ${conflicted ? `<span class="tag tag--warn" title="Host port :${p.hostPort} is published more than once on this host — conflict">conflict</span>` : ''}
       </td>
       <td style="width:1%"><div class="row-actions">
@@ -1183,7 +1200,7 @@ function renderPortsSection(n) {
         <button data-proto="udp" aria-pressed="${portFilter.proto==='udp'}">UDP</button>
       </div>
     </div>
-    ${table}
+    ${tablePortsCollapsed.has(n.id) ? '<p class="muted">Owned ports collapsed</p>' : table}
     ${renderFreeHelper(n)}
   </section>`;
 }
@@ -1649,9 +1666,16 @@ function openPortModal(nodeId = selectedId, portId = null) {
           <input class="input" id="f-desc" value="${esc(p.description)}" placeholder="What listens here" autocomplete="off">
         </div>
         <div class="form-field full">
-          <label for="f-domain">Public domain</label>
+          <label for="f-mode">Exposure mode</label>
+          <select class="input" id="f-mode">
+            <option value="lan" ${(p.exposureMode || (p.domain ? 'cloudflare' : 'lan')) === 'lan' ? 'selected' : ''}>LAN / IP-only</option>
+            <option value="cloudflare" ${(p.exposureMode || (p.domain ? 'cloudflare' : 'lan')) === 'cloudflare' ? 'selected' : ''}>Cloudflare tunnel / domain</option>
+          </select>
+        </div>
+        <div class="form-field full">
+          <label for="f-domain">Hostname / domain</label>
           <input class="input" id="f-domain" value="${esc(p.domain || '')}" placeholder="service.example.com" autocomplete="off" inputmode="url">
-          <div class="hint">Optional — e.g. a Cloudflare Tunnel hostname mapped to this ip:port. Marks the port as internet-reachable.</div>
+          <div class="hint">Hostname for Cloudflare tunnel/domain access. LAN/IP-only uses the node IP address.</div>
         </div>
         <div class="form-field">
           <label for="f-exposure">Exposure</label>
@@ -1673,6 +1697,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
           <select class="input" id="f-pstatus">
             <option value="in_use" ${p.status==='in_use'?'selected':''}>In use</option>
             <option value="reserved" ${p.status==='reserved'?'selected':''}>Reserved</option>
+            ${['active', 'up', 'inactive', 'down'].map(status => `<option value="${status}" ${p.status === status ? 'selected' : ''}>${status}</option>`).join('')}
           </select>
         </div>
         <div class="form-field">
@@ -1705,7 +1730,8 @@ function openPortModal(nodeId = selectedId, portId = null) {
     // client-side pre-check for instant feedback; the server is authoritative (409 handled below)
     const clash = state.ports.some(x => x.nodeId === nodeId && x.portNumber === num && x.protocol === proto && x.id !== (editing?.id));
     if (clash) { document.getElementById('dupErr').style.display = 'block'; return; }
-    const domain = document.getElementById('f-domain').value.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+    const exposureMode = document.getElementById('f-mode').value;
+    const domain = exposureMode === 'lan' ? '' : document.getElementById('f-domain').value.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
     let exposure = document.getElementById('f-exposure').value;
     if (domain && exposure !== 'public') exposure = 'public';
     const hostPortRaw = document.getElementById('f-hostport').value.trim();
@@ -1715,6 +1741,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
       serviceName: document.getElementById('f-svc').value.trim(),
       description: document.getElementById('f-desc').value.trim(),
       domain,
+      exposureMode,
       exposure,
       scheme: document.getElementById('f-scheme').value,
       hostPort,
@@ -1726,7 +1753,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
     try {
       if (editing) { const up = await api.updatePort(editing.id, data); replacePort(up); }
       else { const cp = await api.createPort(nodeId, data); state.ports.push(cp); }
-      renderDetail(); refreshGraphNode(nodeId); refreshChrome();
+      renderDetail(); syncGraph(); refreshChrome();
       closeModal();
       toast(editing ? 'Port updated' : 'Port added', 'ok');
     } catch (e) {
@@ -1738,8 +1765,11 @@ function openPortModal(nodeId = selectedId, portId = null) {
   document.getElementById('portSave').addEventListener('click', submit);
   document.getElementById('portForm').addEventListener('submit', (e)=>{ e.preventDefault(); submit(); });
   const domEl = document.getElementById('f-domain');
+  document.getElementById('f-mode').addEventListener('change', () => {
+    if (document.getElementById('f-mode').value === 'lan') { domEl.value = ''; document.getElementById('f-exposure').value = 'lan'; }
+  });
   domEl.addEventListener('input', () => {
-    if (domEl.value.trim()) { document.getElementById('f-exposure').value = 'public'; document.getElementById('f-scheme').value = 'https'; }
+    if (domEl.value.trim()) { document.getElementById('f-mode').value = 'cloudflare'; document.getElementById('f-exposure').value = 'public'; document.getElementById('f-scheme').value = 'https'; }
   });
 }
 
@@ -1750,7 +1780,7 @@ window.deletePort = async function(portId) {
   try {
     await api.deletePort(portId);
     state.ports = state.ports.filter(x => x.id !== portId);
-    renderDetail(); refreshGraphNode(p.nodeId); refreshChrome();
+    renderDetail(); syncGraph(); refreshChrome();
     toast('Port ' + p.portNumber + '/' + p.protocol + ' removed', 'ok');
   } catch (e) { toast(e.message, 'err'); }
 };
@@ -1946,6 +1976,7 @@ function renderLayers() {
   const contCount = state.nodes.filter(n => n.parentId).length;
   const etoggle = (key, label, color, dashed, count) => `<button class="etoggle ${edgeToggles[key] !== false ? 'on' : ''}" data-edge="${key}" aria-pressed="${edgeToggles[key] !== false}"><span class="etoggle__line ${dashed ? 'dashed' : ''}" style="--ec:${color}"></span><span class="etoggle__lbl">${label}</span><span class="etoggle__n">${count}</span></button>`;
   let eh = etoggle('containment', 'Containment', '#5b6675', false, contCount);
+  eh += etoggle('port_ownership', 'Port ownership', '#94a3b8', true, state.ports.length);
   LINK_ORDER.forEach(k => { const c = state.links.filter(l => l.type === k).length; if (c) eh += etoggle(k, LINK_TYPES[k].label, LINK_TYPES[k].color, true, c); });
   document.getElementById('edgeToggleList').innerHTML = eh;
 }
@@ -2017,7 +2048,7 @@ function openExposureModal() {
         return `<tr data-goto="${n.id}" data-portid="${p.id}" tabindex="0" role="button" aria-label="Go to ${esc(n.name)}">
           <td><span class="cmd__dot" style="background:${(TYPES[n.type] || {}).color}"></span>${esc(n.name)}</td>
           <td class="mono lcell">${addr} <span class="muted">:${p.portNumber}${p.serviceName ? ' ' + esc(p.serviceName) : ''}</span></td>
-          <td><span class="tag ${exp.cls}">${exp.label}</span></td>
+          <td><span class="tag ${exp.cls}">${exp.label}</span><span class="tag">${esc(exposureModeLabel(p))}</span></td>
         </tr>`;
       }).join('')}</tbody>
     </table>` : `<div class="ports-empty" style="margin:var(--sp-5)"><p>Nothing is reachable beyond its host — clean surface.</p></div>`;
@@ -2404,7 +2435,7 @@ layersEl.addEventListener('click', (e) => {
   const cb = e.target.closest('[data-cb]');
   if (cb) { colorBy = cb.dataset.cb; syncGraph(); renderLayers(); return; }
   const et = e.target.closest('[data-edge]');
-  if (et) { const k = et.dataset.edge; edgeToggles[k] = !(edgeToggles[k] !== false); refreshEdges(); renderLayers(); return; }
+  if (et) { const k = et.dataset.edge; edgeToggles[k] = !(edgeToggles[k] !== false); syncGraph(); renderLayers(); return; }
   if (e.target.closest('#layersToggle')) {
     const collapsed = layersEl.classList.toggle('collapsed');
     document.getElementById('layersToggle').setAttribute('aria-expanded', String(!collapsed));
@@ -2443,9 +2474,9 @@ document.getElementById('viewToggle').addEventListener('click', (e) => {
     const activate = (tr) => { const id = tr.dataset.id; if (id) select(id); };
     body.addEventListener('click', (e) => {
       const portToggle = e.target.closest('[data-port-collapse]');
-      if (portToggle) { e.stopPropagation(); const id = portToggle.dataset.portCollapse; if (tablePortsCollapsed.has(id)) tablePortsCollapsed.delete(id); else tablePortsCollapsed.add(id); renderTable(); return; }
+      if (portToggle) { e.stopPropagation(); toggleNodeSection(portToggle.dataset.portCollapse, true); return; }
       const toggle = e.target.closest('[data-collapse]');
-      if (toggle) { e.stopPropagation(); const id = toggle.dataset.collapse; if (tableCollapsed.has(id)) tableCollapsed.delete(id); else tableCollapsed.add(id); renderTable(); return; }
+      if (toggle) { e.stopPropagation(); toggleNodeSection(toggle.dataset.collapse, false); return; }
       const tr = e.target.closest('tr[data-id]'); if (tr) activate(tr);
     });
     body.addEventListener('keydown', (e) => {
@@ -2667,7 +2698,7 @@ function renderImportStep2(body, foot) {
       <div class="ilist">${ports.map(pt => {
         const exp = EXPOSURE[pt.exposure] || EXPOSURE.internal;
         const tgt = tgtName(pt);
-        return `<div class="irow"><span class="irow__port">${esc(pt.portNumber)}/${esc(pt.protocol || 'tcp')}</span><span class="irow__name">${esc(pt.serviceName || 'unnamed')}${pt.hostPort != null ? ` <span class="irow__meta">host :${esc(pt.hostPort)}</span>` : ''}</span>${tgt ? `<span class="irow__tgt">→ ${esc(tgt)}</span>` : '<span class="irow__tgt irow__tgt--none">no target</span>'}<span class="tag ${exp.cls}">${exp.label}</span></div>`;
+        return `<div class="irow"><span class="irow__port">${esc(pt.portNumber)}/${esc(pt.protocol || 'tcp')}</span><span class="irow__name">${esc(pt.serviceName || 'unnamed')}${pt.hostPort != null ? ` <span class="irow__meta">host :${esc(pt.hostPort)}</span>` : ''}</span>${tgt ? `<span class="irow__tgt">→ ${esc(tgt)}</span>` : '<span class="irow__tgt irow__tgt--none">no target</span>'}<span class="tag ${exp.cls}">${exp.label}</span><span class="tag">${esc(exposureModeLabel(pt))}</span></div>`;
       }).join('')}</div>
     </div>` : '';
   body.innerHTML = empty

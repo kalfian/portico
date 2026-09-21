@@ -41,6 +41,7 @@ function portToApi(row) {
     status: row.status,
     domain: row.domain,
     exposure: row.exposure,
+    exposureMode: row.exposure_mode,
     scheme: row.scheme,
     hostPort: row.host_port,
     targetNodeId: row.target_node_id,

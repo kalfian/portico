@@ -8,7 +8,7 @@ const NODE_STATUS = ['up', 'down', 'unknown'];
 const ICON_TYPES = ['', 'selfhst', 'builtin', 'url', 'upload'];
 
 const PORT_PROTOCOLS = ['tcp', 'udp'];
-const PORT_STATUS = ['in_use', 'reserved'];
+const PORT_STATUS = ['in_use', 'reserved', 'active', 'up', 'inactive', 'down'];
 const PORT_EXPOSURE = ['internal', 'lan', 'public'];
 const PORT_SCHEME = ['http', 'https'];
 

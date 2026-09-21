@@ -28,6 +28,7 @@ const MIGRATIONS = [
   { version: 5, file: '005_topology_contract.sql' },
   { version: 6, file: '006_route_target_metadata.sql' },
   { version: 7, file: '007_port_cloudflare_relation.sql' },
+  { version: 8, file: '008_port_exposure_mode.sql' },
 ];
 
 function runMigrations() {

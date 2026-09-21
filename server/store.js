@@ -232,11 +232,19 @@ function resolvePortFields(body, existing) {
     status: has('status') ? body.status : base.status,
     domain: has('domain') ? body.domain : base.domain,
     exposure: has('exposure') ? body.exposure : base.exposure,
+    exposureMode: has('exposureMode') ? body.exposureMode : (body.domain || body.cloudflareRouteId ? 'cloudflare' : (base.exposure_mode || 'lan')),
     scheme: has('scheme') ? body.scheme : base.scheme,
     hostPort: has('hostPort') ? body.hostPort : base.host_port,
     targetNodeId: has('targetNodeId') ? body.targetNodeId : base.target_node_id,
   };
-  // A domain implies internet-reachable (prototype normalizePort rule).
+  if (f.exposureMode === 'lan' && has('exposureMode')) {
+    f.domain = '';
+    if (!has('exposure')) f.exposure = 'lan';
+  }
+  if (f.exposureMode === 'cloudflare' && !String(f.domain || '').trim() && !(body.cloudflareRouteId || base.cloudflare_route_id)) {
+    throw new ApiError(400, 'Cloudflare tunnel/domain mode requires a hostname/domain or route');
+  }
+  // Preserve legacy reachability independently from the access mode.
   if (f.domain && f.exposure !== 'public') f.exposure = 'public';
   if (!E.PORT_SCHEME.includes(f.scheme)) f.scheme = inferScheme(f);
   return f;
@@ -248,6 +256,7 @@ function validatePortFields(f) {
   assertEnum(f.protocol, E.PORT_PROTOCOLS, 'protocol');
   assertEnum(f.status, E.PORT_STATUS, 'status');
   assertEnum(f.exposure, E.PORT_EXPOSURE, 'exposure');
+  assertEnum(f.exposureMode, ['lan', 'cloudflare'], 'exposureMode');
   assertEnum(f.scheme, E.PORT_SCHEME, 'scheme');
   if (f.hostPort !== null && f.hostPort !== undefined && f.hostPort !== '') {
     const hp = Number(f.hostPort);
@@ -257,9 +266,9 @@ function validatePortFields(f) {
 
 const insPort = db.prepare(`
   INSERT INTO ports (id, node_id, port_number, protocol, service_name, description, status,
-                     domain, exposure, scheme, host_port, target_node_id, cloudflare_route_id, last_seen, source, external_id, observed_at, created_at, updated_at)
+                     domain, exposure, exposure_mode, scheme, host_port, target_node_id, cloudflare_route_id, last_seen, source, external_id, observed_at, created_at, updated_at)
   VALUES (@id, @node_id, @port_number, @protocol, @service_name, @description, @status,
-          @domain, @exposure, @scheme, @host_port, @target_node_id, @cloudflare_route_id, @last_seen, @source, @external_id, @observed_at, @created_at, @updated_at)
+          @domain, @exposure, @exposure_mode, @scheme, @host_port, @target_node_id, @cloudflare_route_id, @last_seen, @source, @external_id, @observed_at, @created_at, @updated_at)
 `);
 
 function createPort(nodeId, body) {
@@ -272,7 +281,7 @@ function createPort(nodeId, body) {
     insPort.run({
       id, node_id: nodeId, port_number: Number(f.portNumber), protocol: f.protocol,
       service_name: f.serviceName || '', description: f.description || '', status: f.status,
-      domain: f.domain || '', exposure: f.exposure, scheme: f.scheme,
+      domain: f.domain || '', exposure: f.exposure, exposure_mode: f.exposureMode, scheme: f.scheme,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
       target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId || null, last_seen: null, source: body.source || null, external_id: body.externalId || null, observed_at: body.observedAt || null, created_at: ts, updated_at: ts,
     });
@@ -282,7 +291,7 @@ function createPort(nodeId, body) {
 
 const updPort = db.prepare(`
   UPDATE ports SET port_number=@port_number, protocol=@protocol, service_name=@service_name,
-    description=@description, status=@status, domain=@domain, exposure=@exposure, scheme=@scheme,
+    description=@description, status=@status, domain=@domain, exposure=@exposure, exposure_mode=@exposure_mode, scheme=@scheme,
     host_port=@host_port, target_node_id=@target_node_id, cloudflare_route_id=@cloudflare_route_id, updated_at=@updated_at
   WHERE id=@id
 `);
@@ -295,7 +304,7 @@ function updatePort(id, body) {
   try {
     updPort.run({
       id, port_number: Number(f.portNumber), protocol: f.protocol, service_name: f.serviceName || '',
-      description: f.description || '', status: f.status, domain: f.domain || '', exposure: f.exposure,
+      description: f.description || '', status: f.status, domain: f.domain || '', exposure: f.exposure, exposure_mode: f.exposureMode,
       scheme: f.scheme,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
       target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId === undefined ? existing.cloudflare_route_id : (body.cloudflareRouteId || null), updated_at: now(),
@@ -531,6 +540,16 @@ function isEmpty() {
 function importAll(data) {
   if (!data || !Array.isArray(data.nodes)) throw new ApiError(400, 'import payload must include a nodes array');
   const nodes = data.nodes;
+  const parents = new Map(nodes.map(n => [n.id, n.parentId]));
+  for (const n of nodes) {
+    const seen = new Set([n.id]);
+    let parent = n.parentId;
+    while (parent) {
+      if (seen.has(parent)) throw new ApiError(400, 'parentId would create a cycle', 'cycle_detected');
+      seen.add(parent);
+      parent = parents.get(parent);
+    }
+  }
   const ports = Array.isArray(data.ports) ? data.ports : [];
   const networks = Array.isArray(data.networks) ? data.networks : [];
   const links = Array.isArray(data.links) ? data.links : [];
@@ -587,7 +606,7 @@ function importAll(data) {
         protocol: E.PORT_PROTOCOLS.includes(p.protocol) ? p.protocol : 'tcp',
         service_name: p.serviceName || '', description: p.description || '',
         status: E.PORT_STATUS.includes(p.status) ? p.status : 'in_use',
-        domain: f.domain, exposure: f.exposure, scheme: f.scheme,
+        domain: f.domain, exposure: f.exposure, exposure_mode: f.exposureMode, scheme: f.scheme,
         host_port: f.hostPort, target_node_id: p.targetNodeId || null, cloudflare_route_id: p.cloudflareRouteId || null,
         last_seen: p.lastSeen || null, source: p.source || null, external_id: p.externalId || null, observed_at: p.observedAt || null,
         created_at: p.createdAt || ts, updated_at: p.updatedAt || ts,
@@ -623,7 +642,9 @@ function normalizeImportedPort(p) {
     if (domain) scheme = 'https';
   }
   const hostPort = p.hostPort === undefined || p.hostPort === null || p.hostPort === '' ? null : Number(p.hostPort);
-  return { exposure, domain, scheme, hostPort };
+  const exposureMode = p.exposureMode || (domain || p.cloudflareRouteId ? 'cloudflare' : 'lan');
+  assertEnum(exposureMode, ['lan', 'cloudflare'], 'exposureMode');
+  return { exposure, domain, scheme, hostPort, exposureMode };
 }
 
 // ------------------------------------------------------------------ probe (health check)
@@ -763,7 +784,7 @@ function importParsed(payload = {}) {
           ip_address: f.ipAddress || '', mac_address: f.macAddress || '', os: f.os || '',
           role: f.role || '', status: f.status, network_id: f.networkId || null,
           icon_type: f.iconType || '', icon_value: f.iconValue || '', notes: f.notes || '',
-          pos_x: 0, pos_y: 0, last_seen: null, created_at: ts, updated_at: ts,
+          pos_x: 0, pos_y: 0, last_seen: null, source: n.source || null, external_id: n.externalId || null, observed_at: n.observedAt || null, created_at: ts, updated_at: ts,
         });
         setTagsForNode(id, f.tags || []);
       } catch (err) {
@@ -802,6 +823,7 @@ function importParsed(payload = {}) {
       if (p.domain !== undefined) portBody.domain = p.domain;
       if (p.exposure !== undefined) portBody.exposure = p.exposure;
       if (p.scheme !== undefined) portBody.scheme = p.scheme;
+      if (p.exposureMode !== undefined) portBody.exposureMode = p.exposureMode;
       if (p.hostPort !== undefined) portBody.hostPort = p.hostPort;
       if (p.targetNodeId !== undefined) portBody.targetNodeId = p.targetNodeId;
       if (p.cloudflareRouteId !== undefined) portBody.cloudflareRouteId = p.cloudflareRouteId;
@@ -824,9 +846,9 @@ function importParsed(payload = {}) {
         insPort.run({
           id, node_id: targetNode, port_number: Number(f.portNumber), protocol: f.protocol,
           service_name: f.serviceName || '', description: f.description || '', status: f.status,
-          domain: f.domain || '', exposure: f.exposure, scheme: f.scheme,
+          domain: f.domain || '', exposure: f.exposure, exposure_mode: f.exposureMode, scheme: f.scheme,
           host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-          target_node_id: f.targetNodeId || null, last_seen: null, created_at: ts, updated_at: ts,
+          target_node_id: f.targetNodeId || null, cloudflare_route_id: p.cloudflareRouteId || null, source: p.source || null, external_id: p.externalId || null, observed_at: p.observedAt || null, last_seen: null, created_at: ts, updated_at: ts,
         });
       } catch (err) {
         result.ports.skipped.push({ nodeId: targetNode, portNumber: Number(f.portNumber), protocol: f.protocol, reason: (mapDbError(err) || err).message });
