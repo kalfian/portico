@@ -88,6 +88,7 @@ const spec = {
           scheme: { type: 'string', enum: ['http', 'https'] },
           hostPort: { type: 'integer', nullable: true },
           targetNodeId: { type: 'string', nullable: true },
+          cloudflareRouteId: { type: 'string', nullable: true },
           lastSeen: { type: 'string', nullable: true, description: 'ISO-8601 UTC time this port last accepted a TCP connect during a probe. Null = never.' },
           createdAt: { type: 'string' },
           updatedAt: { type: 'string' },
