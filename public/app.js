@@ -375,7 +375,10 @@ function saveNodePosition(id) {
 /* ================= GRAPH ================= */
 let network, nodesDS, edgesDS;
 let colorBy = 'type';                                   // 'type' | 'network'
-const edgeToggles = { containment: true, network: true, virtualization: true, port_ownership: true, proxy: true, mount: true, dns: true, custom: true };
+// The default canvas shows the readable containment path. Network and
+// virtualization edges remain available in Layers, but otherwise duplicate or
+// cross the primary MikroTik → world → guest → port hierarchy.
+const edgeToggles = { containment: true, network: false, virtualization: false, port_ownership: true, proxy: true, mount: true, dns: true, custom: true };
 let focusSet = null;                                     // node ids emphasised in selection focus-mode
 
 /* node colour depends on the active "colour by" mode */
@@ -458,9 +461,15 @@ function portVis(p) {
   const exposure = EXPOSURE[p.exposure] || EXPOSURE.internal;
   const domain = p.domain ? `\\n${p.domain}` : '';
   const target = p.targetNodeId ? nodeById(p.targetNodeId) : null;
+  // Spread owned ports into a compact row below the owner. Without this,
+  // every port inherited the same offset and rendered as one unreadable stack.
+  const owned = portsFor(p.nodeId).slice().sort((a, b) => (a.portNumber || 0) - (b.portNumber || 0));
+  const index = Math.max(0, owned.findIndex(x => x.id === p.id));
+  const gap = 145;
+  const start = -((Math.max(owned.length, 1) - 1) * gap) / 2;
   return {
     id: portGraphId(p), label: `${p.serviceName || 'service'}\\n${p.portNumber}/${p.protocol} · ${exposure.label}${domain}${target ? `\\n→ ${target.name}` : ''}`,
-    shape: 'box', margin: 7, x: (owner?.posX || 0) + 40, y: (owner?.posY || 0) + 45,
+    shape: 'box', margin: 7, x: (owner?.posX || 0) + start + index * gap, y: (owner?.posY || 0) + 105,
     color: { background: '#192532', border: exposure.label === 'public' ? '#f87171' : '#3b82f6', highlight: { background: '#22364a', border: '#67e8f9' } },
     font: { color: '#dbeafe', size: 10, face: 'SFMono-Regular, monospace', multi: 'md' },
     borderWidth: 1, shadow: { enabled: true, color: 'rgba(0,0,0,.3)', size: 6, x: 0, y: 2 },
