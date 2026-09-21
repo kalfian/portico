@@ -18,6 +18,7 @@ router.get('/topology', wrap((req, res) => {
   const ports = store.getTopology().ports;
   const networks = store.listNetworks();
   const links = store.listLinks();
+  const cloudflareRoutes = store.listCloudflareRoutes();
 
   const edges = [];
   for (const n of nodes) {
@@ -27,11 +28,12 @@ router.get('/topology', wrap((req, res) => {
     edges.push({ id: l.id, from: l.fromNodeId, to: l.toNodeId, kind: 'link', type: l.type, label: l.label });
   }
 
-  res.json({ nodes, ports, networks, links, edges });
+  res.json({ contract: 'portico.topology.v1', nodes, ports, networks, links, cloudflareRoutes, edges });
 }));
 
 // Full export — same shape as the prototype's JSON export (camelCase).
 router.get('/export', wrap((req, res) => res.json(store.exportAll())));
+router.get('/cloudflare-routes', wrap((req, res) => res.json(store.listCloudflareRoutes())));
 
 // Replace-all import (transactional). Auth required.
 router.post('/import', requireWrite, wrap((req, res) => res.json(store.importAll(req.body || {}))));

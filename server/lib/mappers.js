@@ -22,6 +22,9 @@ function nodeToApi(row, tags = []) {
     posX: row.pos_x,
     posY: row.pos_y,
     lastSeen: row.last_seen ?? null,
+    source: row.source ?? null,
+    externalId: row.external_id ?? null,
+    observedAt: row.observed_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -41,7 +44,11 @@ function portToApi(row) {
     scheme: row.scheme,
     hostPort: row.host_port,
     targetNodeId: row.target_node_id,
+    cloudflareRouteId: row.cloudflare_route_id ?? null,
     lastSeen: row.last_seen ?? null,
+    source: row.source ?? null,
+    externalId: row.external_id ?? null,
+    observedAt: row.observed_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

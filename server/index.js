@@ -10,6 +10,7 @@ const { authenticate } = require('./auth');
 const { ApiError } = require('./lib/util');
 
 const PORT = Number(process.env.PORT) || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 // Signs the session cookie. Set SESSION_SECRET in any real deployment.
 const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-home-topology';
 // `secure` cookie is opt-in (enable once behind an HTTPS reverse proxy).
@@ -68,8 +69,8 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: { code, message: err.message || 'Internal server error' } });
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`[server] Home Server Topology API listening on http://localhost:${PORT}`);
+const server = app.listen(PORT, HOST, () => {
+  console.log(`[server] Home Server Topology API listening on http://${HOST}:${PORT}`);
 });
 
 // Graceful shutdown for Docker / nodemon.

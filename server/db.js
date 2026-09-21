@@ -24,6 +24,10 @@ const MIGRATIONS = [
   { version: 1, file: '001_init.sql' },
   { version: 2, file: '002_tokens.sql' },
   { version: 3, file: '003_last_seen.sql' },
+  { version: 4, file: '004_inventory_metadata.sql' },
+  { version: 5, file: '005_topology_contract.sql' },
+  { version: 6, file: '006_route_target_metadata.sql' },
+  { version: 7, file: '007_port_cloudflare_relation.sql' },
 ];
 
 function runMigrations() {

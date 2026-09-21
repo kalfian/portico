@@ -124,9 +124,9 @@ function resolveNodeFields(body, existing) {
 
 const insNode = db.prepare(`
   INSERT INTO nodes (id, name, type, parent_id, ip_address, mac_address, os, role, status,
-                     network_id, icon_type, icon_value, notes, pos_x, pos_y, last_seen, created_at, updated_at)
+                     network_id, icon_type, icon_value, notes, pos_x, pos_y, last_seen, source, external_id, observed_at, created_at, updated_at)
   VALUES (@id, @name, @type, @parent_id, @ip_address, @mac_address, @os, @role, @status,
-          @network_id, @icon_type, @icon_value, @notes, @pos_x, @pos_y, @last_seen, @created_at, @updated_at)
+          @network_id, @icon_type, @icon_value, @notes, @pos_x, @pos_y, @last_seen, @source, @external_id, @observed_at, @created_at, @updated_at)
 `);
 
 function createNode(body, providedId) {
@@ -145,7 +145,7 @@ function createNode(body, providedId) {
         ip_address: f.ipAddress || '', mac_address: f.macAddress || '', os: f.os || '',
         role: f.role || '', status: f.status, network_id: f.networkId || null,
         icon_type: f.iconType || '', icon_value: f.iconValue || '', notes: f.notes || '',
-        pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, last_seen: null, created_at: ts, updated_at: ts,
+        pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, last_seen: null, source: body.source || null, external_id: body.externalId || null, observed_at: body.observedAt || null, created_at: ts, updated_at: ts,
       });
     } catch (err) { throw mapDbError(err); }
     setTagsForNode(id, f.tags || []);
@@ -257,9 +257,9 @@ function validatePortFields(f) {
 
 const insPort = db.prepare(`
   INSERT INTO ports (id, node_id, port_number, protocol, service_name, description, status,
-                     domain, exposure, scheme, host_port, target_node_id, last_seen, created_at, updated_at)
+                     domain, exposure, scheme, host_port, target_node_id, cloudflare_route_id, last_seen, source, external_id, observed_at, created_at, updated_at)
   VALUES (@id, @node_id, @port_number, @protocol, @service_name, @description, @status,
-          @domain, @exposure, @scheme, @host_port, @target_node_id, @last_seen, @created_at, @updated_at)
+          @domain, @exposure, @scheme, @host_port, @target_node_id, @cloudflare_route_id, @last_seen, @source, @external_id, @observed_at, @created_at, @updated_at)
 `);
 
 function createPort(nodeId, body) {
@@ -274,7 +274,7 @@ function createPort(nodeId, body) {
       service_name: f.serviceName || '', description: f.description || '', status: f.status,
       domain: f.domain || '', exposure: f.exposure, scheme: f.scheme,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-      target_node_id: f.targetNodeId || null, last_seen: null, created_at: ts, updated_at: ts,
+      target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId || null, last_seen: null, source: body.source || null, external_id: body.externalId || null, observed_at: body.observedAt || null, created_at: ts, updated_at: ts,
     });
   } catch (err) { throw mapDbError(err); }
   return portToApi(getPortRow(id));
@@ -283,7 +283,7 @@ function createPort(nodeId, body) {
 const updPort = db.prepare(`
   UPDATE ports SET port_number=@port_number, protocol=@protocol, service_name=@service_name,
     description=@description, status=@status, domain=@domain, exposure=@exposure, scheme=@scheme,
-    host_port=@host_port, target_node_id=@target_node_id, updated_at=@updated_at
+    host_port=@host_port, target_node_id=@target_node_id, cloudflare_route_id=@cloudflare_route_id, updated_at=@updated_at
   WHERE id=@id
 `);
 
@@ -298,7 +298,7 @@ function updatePort(id, body) {
       description: f.description || '', status: f.status, domain: f.domain || '', exposure: f.exposure,
       scheme: f.scheme,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-      target_node_id: f.targetNodeId || null, updated_at: now(),
+      target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId === undefined ? existing.cloudflare_route_id : (body.cloudflareRouteId || null), updated_at: now(),
     });
   } catch (err) { throw mapDbError(err); }
   return portToApi(getPortRow(id));
@@ -495,8 +495,17 @@ function deleteLink(id) {
 
 // ------------------------------------------------------------------ topology / export / import
 
+function listCloudflareRoutes() {
+  return db.prepare('SELECT * FROM cloudflare_routes ORDER BY hostname').all().map((r) => ({
+    id: r.id, hostname: r.hostname, target: r.target, exposure: r.exposure,
+    targetHost: r.target_host, targetPort: r.target_port,
+    notes: r.notes, source: r.source, observedAt: r.observed_at ?? null,
+    createdAt: r.created_at, updatedAt: r.updated_at,
+  }));
+}
+
 function getTopology() {
-  return { nodes: listNodes(), ports: allPorts(), networks: listNetworks(), links: listLinks() };
+  return { nodes: listNodes(), ports: allPorts(), networks: listNetworks(), links: listLinks(), cloudflareRoutes: listCloudflareRoutes() };
 }
 
 function allPorts() {
@@ -505,7 +514,12 @@ function allPorts() {
 
 // Export = migration contract, identical shape to the prototype's JSON export.
 function exportAll() {
-  return { nodes: listNodes(), ports: allPorts(), networks: listNetworks(), links: listLinks() };
+  return {
+    contract: 'portico.topology.v1',
+    description: 'Explicit manually maintained hosts, apps, ports, exposure, and Cloudflare routes.',
+    nodes: listNodes(), ports: allPorts(), networks: listNetworks(), links: listLinks(),
+    cloudflareRoutes: listCloudflareRoutes(),
+  };
 }
 
 function isEmpty() {
@@ -520,6 +534,7 @@ function importAll(data) {
   const ports = Array.isArray(data.ports) ? data.ports : [];
   const networks = Array.isArray(data.networks) ? data.networks : [];
   const links = Array.isArray(data.links) ? data.links : [];
+  const cloudflareRoutes = Array.isArray(data.cloudflareRoutes) ? data.cloudflareRoutes : [];
   const ts = now();
 
   const run = db.transaction(() => {
@@ -530,6 +545,17 @@ function importAll(data) {
     db.prepare('DELETE FROM ports').run();
     db.prepare('DELETE FROM nodes').run();
     db.prepare('DELETE FROM networks').run();
+    db.prepare('DELETE FROM cloudflare_routes').run();
+
+    for (const route of cloudflareRoutes) {
+      db.prepare(`INSERT INTO cloudflare_routes
+        (id, hostname, target, target_host, target_port, exposure, notes, source, observed_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(route.id || uid('cf'), String(route.hostname || '').trim(), String(route.target || ''),
+          String(route.targetHost || ''), route.targetPort == null ? null : Number(route.targetPort),
+          route.exposure === 'public' ? 'public' : 'internal', String(route.notes || ''),
+          String(route.source || 'manual'), route.observedAt || null, route.createdAt || ts, route.updatedAt || ts);
+    }
 
     for (const nw of networks) {
       insNetwork.run({
@@ -549,7 +575,7 @@ function importAll(data) {
         role: n.role || '', status, network_id: n.networkId || null, icon_type: iconType,
         icon_value: typeof n.iconValue === 'string' ? n.iconValue : '', notes: n.notes || '',
         pos_x: Number(n.posX) || 0, pos_y: Number(n.posY) || 0,
-        last_seen: n.lastSeen || null,
+        last_seen: n.lastSeen || null, source: n.source || null, external_id: n.externalId || null, observed_at: n.observedAt || null,
         created_at: n.createdAt || ts, updated_at: n.updatedAt || ts,
       });
       setTagsForNode(id, Array.isArray(n.tags) ? n.tags : []);
@@ -562,8 +588,8 @@ function importAll(data) {
         service_name: p.serviceName || '', description: p.description || '',
         status: E.PORT_STATUS.includes(p.status) ? p.status : 'in_use',
         domain: f.domain, exposure: f.exposure, scheme: f.scheme,
-        host_port: f.hostPort, target_node_id: p.targetNodeId || null,
-        last_seen: p.lastSeen || null,
+        host_port: f.hostPort, target_node_id: p.targetNodeId || null, cloudflare_route_id: p.cloudflareRouteId || null,
+        last_seen: p.lastSeen || null, source: p.source || null, external_id: p.externalId || null, observed_at: p.observedAt || null,
         created_at: p.createdAt || ts, updated_at: p.updatedAt || ts,
       });
     }
@@ -778,6 +804,7 @@ function importParsed(payload = {}) {
       if (p.scheme !== undefined) portBody.scheme = p.scheme;
       if (p.hostPort !== undefined) portBody.hostPort = p.hostPort;
       if (p.targetNodeId !== undefined) portBody.targetNodeId = p.targetNodeId;
+      if (p.cloudflareRouteId !== undefined) portBody.cloudflareRouteId = p.cloudflareRouteId;
       const f = resolvePortFields(portBody, null);
       try {
         validatePortFields(f);
@@ -829,7 +856,7 @@ module.exports = {
   // links
   listLinks, createLink, updateLink, deleteLink,
   // aggregate
-  getTopology, exportAll, importAll, isEmpty,
+  getTopology, exportAll, importAll, isEmpty, listCloudflareRoutes,
   // probe (health check)
   listProbeTargets, recordProbeResult,
   // import (parse → apply)

@@ -295,8 +295,9 @@ const spec = {
       put: { tags: ['links'], summary: 'Update link', security: [{ cookieAuth: [] }, { bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/Link' } } } }, responses: { 200: { description: 'OK' }, 404: errorResponse } },
       delete: { tags: ['links'], summary: 'Delete link', security: [{ cookieAuth: [] }, { bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'OK' }, 404: errorResponse } },
     },
-    '/api/topology': { get: { tags: ['data'], summary: 'Graph-shaped topology (nodes, ports, networks, links, edges)', responses: { 200: { description: 'OK' } } } },
-    '/api/export': { get: { tags: ['data'], summary: 'Full export (JSON migration contract)', responses: { 200: { description: 'OK', content: { 'application/json': { schema: { $ref: '#/components/schemas/DataBundle' } } } } } } },
+    '/api/topology': { get: { tags: ['data'], summary: 'Explicit topology (hosts, apps, ports, exposure, Cloudflare routes)', responses: { 200: { description: 'OK' } } } },
+    '/api/export': { get: { tags: ['data'], summary: 'Full explicit topology export (portico.topology.v1)', responses: { 200: { description: 'OK', content: { 'application/json': { schema: { $ref: '#/components/schemas/DataBundle' } } } } } } },
+    '/api/cloudflare-routes': { get: { tags: ['data'], summary: 'Explicit Cloudflare route metadata', responses: { 200: { description: 'OK' } } } },
     '/api/import': { post: { tags: ['data'], summary: 'Replace-all import (transactional)', security: [{ cookieAuth: [] }, { bearerAuth: [] }], requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/DataBundle' } } } }, responses: { 200: { description: 'OK' }, 400: errorResponse } } },
 
     '/api/probe': {

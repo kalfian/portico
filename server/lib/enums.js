@@ -12,7 +12,7 @@ const PORT_STATUS = ['in_use', 'reserved'];
 const PORT_EXPOSURE = ['internal', 'lan', 'public'];
 const PORT_SCHEME = ['http', 'https'];
 
-const LINK_TYPES = ['proxy', 'mount', 'dns', 'custom'];
+const LINK_TYPES = ['network', 'virtualization', 'proxy', 'mount', 'dns', 'custom'];
 
 module.exports = {
   NODE_TYPES,

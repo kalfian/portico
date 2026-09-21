@@ -7,7 +7,7 @@
 const store = require('../store');
 
 function buildLlmContext() {
-  const { nodes, ports, networks, links } = store.exportAll();
+  const { nodes, ports, networks, links, cloudflareRoutes = [] } = store.exportAll();
 
   const nodeById = new Map(nodes.map((n) => [n.id, n]));
   const netById = new Map(networks.map((w) => [w.id, w]));
@@ -76,6 +76,12 @@ function buildLlmContext() {
   for (const r of roots) renderNode(r, 0);
   lines.push('');
 
+  if (cloudflareRoutes.length) {
+    lines.push('## Cloudflare routes (explicit metadata)');
+    for (const route of cloudflareRoutes) lines.push(`- **${route.hostname}** → ${route.target} [${route.exposure}; source:${route.source}]`);
+    lines.push('');
+  }
+
   // Dependency links
   if (links.length) {
     lines.push('## Dependency links (non-containment)');
@@ -88,7 +94,7 @@ function buildLlmContext() {
     lines.push('');
   }
 
-  return { summary: lines.join('\n'), data: { nodes, ports, networks, links } };
+  return { summary: lines.join('\n'), data: { nodes, ports, networks, links, cloudflareRoutes } };
 }
 
 module.exports = { buildLlmContext };
