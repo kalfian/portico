@@ -38,6 +38,18 @@ function getTagsForNode(nodeId) {
     .map((r) => r.name);
 }
 
+function getParentIds(nodeId) {
+  return db.prepare('SELECT parent_id FROM node_parents WHERE node_id = ? ORDER BY rowid').all(nodeId).map((r) => r.parent_id);
+}
+
+const insNodeParent = db.prepare('INSERT INTO node_parents(node_id, parent_id, created_at) VALUES (?, ?, ?)');
+const delNodeParents = db.prepare('DELETE FROM node_parents WHERE node_id = ?');
+
+function setParentsForNode(nodeId, parentIds) {
+  delNodeParents.run(nodeId);
+  for (const parentId of parentIds) insNodeParent.run(nodeId, parentId, now());
+}
+
 const insTag = db.prepare('INSERT OR IGNORE INTO tags(name) VALUES (?)');
 const selTag = db.prepare('SELECT id FROM tags WHERE name = ?');
 const insNodeTag = db.prepare('INSERT OR IGNORE INTO node_tags(node_id, tag_id) VALUES (?, ?)');
@@ -64,27 +76,39 @@ function getNodeRow(id) {
 
 function listNodes() {
   const rows = db.prepare('SELECT * FROM nodes ORDER BY created_at, rowid').all();
-  return rows.map((r) => nodeToApi(r, getTagsForNode(r.id)));
+  return rows.map((r) => nodeToApi(r, getTagsForNode(r.id), getParentIds(r.id)));
 }
 
 function getNode(id) {
   const row = getNodeRow(id);
   if (!row) throw new ApiError(404, 'Node not found');
-  return nodeToApi(row, getTagsForNode(id));
+  return nodeToApi(row, getTagsForNode(id), getParentIds(id));
 }
 
-// Walk up from `startParentId`; if we ever reach `nodeId`, setting it as parent forms a cycle.
+function normalizeParentIds(value) {
+  if (!Array.isArray(value)) throw new ApiError(400, 'parentIds must be an array');
+  return [...new Set(value.filter(Boolean).map(String))];
+}
+
 function wouldCreateCycle(nodeId, startParentId) {
-  let cur = startParentId;
+  const pending = [startParentId];
   const seen = new Set();
-  while (cur) {
+  while (pending.length) {
+    const cur = pending.pop();
     if (cur === nodeId) return true;
-    if (seen.has(cur)) break; // pre-existing loop guard
+    if (seen.has(cur)) continue;
     seen.add(cur);
-    const row = getNodeRow(cur);
-    cur = row ? row.parent_id : null;
+    pending.push(...getParentIds(cur));
   }
   return false;
+}
+
+function validateParentIds(nodeId, parentIds) {
+  for (const parentId of parentIds) {
+    if (parentId === nodeId) throw new ApiError(400, 'A node cannot be its own parent', 'cycle_detected');
+    if (!getNodeRow(parentId)) throw new ApiError(400, `parentId not found: ${parentId}`);
+    if (wouldCreateCycle(nodeId, parentId)) throw new ApiError(400, 'parentIds would create a cycle', 'cycle_detected');
+  }
 }
 
 function validateNodeFields(f) {
@@ -98,7 +122,7 @@ function validateNodeFields(f) {
 // Resolve final field values for create/update: overlay body onto defaults/existing.
 function resolveNodeFields(body, existing) {
   const base = existing || {
-    name: '', type: 'physical', parent_id: null, ip_address: '', mac_address: '',
+    name: '', type: 'physical', ip_address: '', mac_address: '',
     os: '', role: '', status: 'unknown', network_id: null, icon_type: '', icon_value: '',
     notes: '', pos_x: 0, pos_y: 0,
   };
@@ -106,7 +130,7 @@ function resolveNodeFields(body, existing) {
   return {
     name: has('name') ? body.name : base.name,
     type: has('type') ? body.type : base.type,
-    parentId: has('parentId') ? body.parentId : base.parent_id,
+    parentIds: has('parentIds') ? normalizeParentIds(body.parentIds) : (existing ? getParentIds(existing.id) : []),
     ipAddress: has('ipAddress') ? body.ipAddress : base.ip_address,
     macAddress: has('macAddress') ? body.macAddress : base.mac_address,
     os: has('os') ? body.os : base.os,
@@ -133,21 +157,19 @@ function createNode(body, providedId) {
   const f = resolveNodeFields(body, null);
   validateNodeFields(f);
   const id = providedId || body.id || uid('n');
-  if (f.parentId) {
-    if (f.parentId === id) throw new ApiError(400, 'A node cannot be its own parent', 'cycle_detected');
-    if (wouldCreateCycle(id, f.parentId)) throw new ApiError(400, 'parentId would create a cycle', 'cycle_detected');
-  }
+  validateParentIds(id, f.parentIds);
   const ts = now();
   const run = db.transaction(() => {
     try {
       insNode.run({
-        id, name: String(f.name).trim(), type: f.type, parent_id: f.parentId || null,
+        id, name: String(f.name).trim(), type: f.type, parent_id: null,
         ip_address: f.ipAddress || '', mac_address: f.macAddress || '', os: f.os || '',
         role: f.role || '', status: f.status, network_id: f.networkId || null,
         icon_type: f.iconType || '', icon_value: f.iconValue || '', notes: f.notes || '',
         pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, last_seen: null, created_at: ts, updated_at: ts,
       });
     } catch (err) { throw mapDbError(err); }
+    setParentsForNode(id, f.parentIds);
     setTagsForNode(id, f.tags || []);
   });
   run();
@@ -167,37 +189,28 @@ function updateNode(id, body) {
   if (!existing) throw new ApiError(404, 'Node not found');
   const f = resolveNodeFields(body, existing);
   validateNodeFields(f);
-  if (f.parentId) {
-    if (f.parentId === id) throw new ApiError(400, 'A node cannot be its own parent', 'cycle_detected');
-    if (wouldCreateCycle(id, f.parentId)) throw new ApiError(400, 'parentId would create a cycle', 'cycle_detected');
-  }
+  validateParentIds(id, f.parentIds);
   const run = db.transaction(() => {
     try {
       updNode.run({
-        id, name: String(f.name).trim(), type: f.type, parent_id: f.parentId || null,
+        id, name: String(f.name).trim(), type: f.type, parent_id: null,
         ip_address: f.ipAddress || '', mac_address: f.macAddress || '', os: f.os || '',
         role: f.role || '', status: f.status, network_id: f.networkId || null,
         icon_type: f.iconType || '', icon_value: f.iconValue || '', notes: f.notes || '',
         pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, updated_at: now(),
       });
     } catch (err) { throw mapDbError(err); }
+    setParentsForNode(id, f.parentIds);
     if (f.tags !== undefined) setTagsForNode(id, f.tags);
   });
   run();
   return getNode(id);
 }
 
-// Delete a node; direct children reparent to the deleted node's parent (grandparent),
-// matching the prototype. Ports/links/node_tags cascade via FK; incoming targetNodeId → NULL.
 function deleteNode(id) {
   const existing = getNodeRow(id);
   if (!existing) throw new ApiError(404, 'Node not found');
-  const run = db.transaction(() => {
-    db.prepare('UPDATE nodes SET parent_id = ?, updated_at = ? WHERE parent_id = ?')
-      .run(existing.parent_id || null, now(), id);
-    db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
-  });
-  run();
+  db.prepare('DELETE FROM nodes WHERE id = ?').run(id);
   return { id, deleted: true };
 }
 
@@ -222,6 +235,7 @@ function resolvePortFields(body, existing) {
   const base = existing || {
     port_number: null, protocol: 'tcp', service_name: '', description: '', status: 'in_use',
     domain: '', exposure: 'internal', scheme: 'http', host_port: null, target_node_id: null,
+    external_url: '', pos_x: 0, pos_y: 0,
   };
   const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
   const f = {
@@ -235,6 +249,9 @@ function resolvePortFields(body, existing) {
     scheme: has('scheme') ? body.scheme : base.scheme,
     hostPort: has('hostPort') ? body.hostPort : base.host_port,
     targetNodeId: has('targetNodeId') ? body.targetNodeId : base.target_node_id,
+    externalUrl: has('externalUrl') ? body.externalUrl : base.external_url,
+    posX: has('posX') ? body.posX : base.pos_x,
+    posY: has('posY') ? body.posY : base.pos_y,
   };
   // A domain implies internet-reachable (prototype normalizePort rule).
   if (f.domain && f.exposure !== 'public') f.exposure = 'public';
@@ -253,13 +270,18 @@ function validatePortFields(f) {
     const hp = Number(f.hostPort);
     if (!Number.isInteger(hp) || hp < 1 || hp > 65535) throw new ApiError(400, 'hostPort must be an integer 1..65535 or null');
   }
+  if (f.externalUrl) {
+    let url;
+    try { url = new URL(f.externalUrl); } catch (err) { throw new ApiError(400, 'externalUrl must be an absolute http(s) URL'); }
+    if (!['http:', 'https:'].includes(url.protocol)) throw new ApiError(400, 'externalUrl must use http or https');
+  }
 }
 
 const insPort = db.prepare(`
   INSERT INTO ports (id, node_id, port_number, protocol, service_name, description, status,
-                     domain, exposure, scheme, host_port, target_node_id, last_seen, created_at, updated_at)
+                     domain, exposure, scheme, host_port, target_node_id, external_url, pos_x, pos_y, last_seen, created_at, updated_at)
   VALUES (@id, @node_id, @port_number, @protocol, @service_name, @description, @status,
-          @domain, @exposure, @scheme, @host_port, @target_node_id, @last_seen, @created_at, @updated_at)
+          @domain, @exposure, @scheme, @host_port, @target_node_id, @external_url, @pos_x, @pos_y, @last_seen, @created_at, @updated_at)
 `);
 
 function createPort(nodeId, body) {
@@ -274,7 +296,8 @@ function createPort(nodeId, body) {
       service_name: f.serviceName || '', description: f.description || '', status: f.status,
       domain: f.domain || '', exposure: f.exposure, scheme: f.scheme,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-      target_node_id: f.targetNodeId || null, last_seen: null, created_at: ts, updated_at: ts,
+      target_node_id: f.targetNodeId || null, external_url: f.externalUrl || '',
+      pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, last_seen: null, created_at: ts, updated_at: ts,
     });
   } catch (err) { throw mapDbError(err); }
   return portToApi(getPortRow(id));
@@ -283,7 +306,7 @@ function createPort(nodeId, body) {
 const updPort = db.prepare(`
   UPDATE ports SET port_number=@port_number, protocol=@protocol, service_name=@service_name,
     description=@description, status=@status, domain=@domain, exposure=@exposure, scheme=@scheme,
-    host_port=@host_port, target_node_id=@target_node_id, updated_at=@updated_at
+    host_port=@host_port, target_node_id=@target_node_id, external_url=@external_url, pos_x=@pos_x, pos_y=@pos_y, updated_at=@updated_at
   WHERE id=@id
 `);
 
@@ -298,7 +321,8 @@ function updatePort(id, body) {
       description: f.description || '', status: f.status, domain: f.domain || '', exposure: f.exposure,
       scheme: f.scheme,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-      target_node_id: f.targetNodeId || null, updated_at: now(),
+      target_node_id: f.targetNodeId || null, external_url: f.externalUrl || '',
+      pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, updated_at: now(),
     });
   } catch (err) { throw mapDbError(err); }
   return portToApi(getPortRow(id));
@@ -528,6 +552,7 @@ function importAll(data) {
     db.prepare('DELETE FROM tags').run();
     db.prepare('DELETE FROM links').run();
     db.prepare('DELETE FROM ports').run();
+    db.prepare('DELETE FROM node_parents').run();
     db.prepare('DELETE FROM nodes').run();
     db.prepare('DELETE FROM networks').run();
 
@@ -538,13 +563,14 @@ function importAll(data) {
         color: nw.color || '', created_at: nw.createdAt || ts, updated_at: nw.updatedAt || ts,
       });
     }
+    const parentIdsByNode = new Map();
     for (const n of nodes) {
       const id = n.id || uid('n');
       const iconType = E.ICON_TYPES.includes(n.iconType) ? n.iconType : '';
       const status = E.NODE_STATUS.includes(n.status) ? n.status : 'unknown';
       const type = E.NODE_TYPES.includes(n.type) ? n.type : 'physical';
       insNode.run({
-        id, name: String(n.name || '').trim(), type, parent_id: n.parentId || null,
+        id, name: String(n.name || '').trim(), type, parent_id: null,
         ip_address: n.ipAddress || '', mac_address: n.macAddress || '', os: n.os || '',
         role: n.role || '', status, network_id: n.networkId || null, icon_type: iconType,
         icon_value: typeof n.iconValue === 'string' ? n.iconValue : '', notes: n.notes || '',
@@ -552,7 +578,12 @@ function importAll(data) {
         last_seen: n.lastSeen || null,
         created_at: n.createdAt || ts, updated_at: n.updatedAt || ts,
       });
+      parentIdsByNode.set(id, normalizeParentIds(Array.isArray(n.parentIds) ? n.parentIds : (n.parentId ? [n.parentId] : [])));
       setTagsForNode(id, Array.isArray(n.tags) ? n.tags : []);
+    }
+    for (const [id, parentIds] of parentIdsByNode) {
+      validateParentIds(id, parentIds);
+      setParentsForNode(id, parentIds);
     }
     for (const p of ports) {
       const f = normalizeImportedPort(p);
@@ -563,6 +594,7 @@ function importAll(data) {
         status: E.PORT_STATUS.includes(p.status) ? p.status : 'in_use',
         domain: f.domain, exposure: f.exposure, scheme: f.scheme,
         host_port: f.hostPort, target_node_id: p.targetNodeId || null,
+        external_url: f.externalUrl, pos_x: f.posX, pos_y: f.posY,
         last_seen: p.lastSeen || null,
         created_at: p.createdAt || ts, updated_at: p.updatedAt || ts,
       });
@@ -597,7 +629,10 @@ function normalizeImportedPort(p) {
     if (domain) scheme = 'https';
   }
   const hostPort = p.hostPort === undefined || p.hostPort === null || p.hostPort === '' ? null : Number(p.hostPort);
-  return { exposure, domain, scheme, hostPort };
+  const externalUrl = typeof p.externalUrl === 'string' ? p.externalUrl : '';
+  const posX = Number(p.posX) || 0;
+  const posY = Number(p.posY) || 0;
+  return { exposure, domain, scheme, hostPort, externalUrl, posX, posY };
 }
 
 // ------------------------------------------------------------------ probe (health check)
@@ -620,7 +655,7 @@ function listProbeTargets({ nodeIds } = {}) {
     rows = db.prepare('SELECT * FROM nodes ORDER BY created_at, rowid').all();
   }
   return rows.map((r) => ({
-    node: nodeToApi(r, getTagsForNode(r.id)),
+    node: nodeToApi(r, getTagsForNode(r.id), getParentIds(r.id)),
     ports: db.prepare('SELECT * FROM ports WHERE node_id = ? ORDER BY port_number, protocol').all(r.id).map(portToApi),
   }));
 }
@@ -655,9 +690,9 @@ function recordProbeResult({ nodeId, status, nodeLastSeen, openPortIds, portLast
 // Apply a parsed/edited import payload additively (does NOT replace-all like
 // importAll). Everything happens in one transaction; de-dupes against existing
 // data and returns what was created vs skipped.
-//   payload = { nodes?, ports?, parentId?, networkId?, nodeId? }
+//   payload = { nodes?, ports?, parentIds?, networkId?, nodeId? }
 //   - node.ref     : correlates a payload node to its payload ports (nodeRef)
-//   - parentId     : default parent for created nodes lacking their own parentId
+//   - parentIds    : default parents for created nodes lacking their own parentIds
 //   - networkId    : default network for created nodes lacking their own networkId
 //   - nodeId       : default target node for ports lacking node association (ss)
 // Node dedupe: existing match by name (case-insensitive) OR non-empty ipAddress.
@@ -665,11 +700,11 @@ function recordProbeResult({ nodeId, status, nodeLastSeen, openPortIds, portLast
 function importParsed(payload = {}) {
   const inNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
   const inPorts = Array.isArray(payload.ports) ? payload.ports : [];
-  const defParent = payload.parentId || null;
+  const defParentIds = normalizeParentIds(payload.parentIds || []);
   const defNetwork = payload.networkId || null;
   const defNodeId = payload.nodeId || null;
 
-  if (defParent && !getNodeRow(defParent)) throw new ApiError(400, `parentId not found: ${defParent}`);
+  for (const parentId of defParentIds) if (!getNodeRow(parentId)) throw new ApiError(400, `parentId not found: ${parentId}`);
   if (defNetwork && !getNetworkRow(defNetwork)) throw new ApiError(400, `networkId not found: ${defNetwork}`);
   if (defNodeId && !getNodeRow(defNodeId)) throw new ApiError(400, `nodeId not found: ${defNodeId}`);
 
@@ -711,7 +746,7 @@ function importParsed(payload = {}) {
       const body = {
         name,
         type: E.NODE_TYPES.includes(n.type) ? n.type : 'physical',
-        parentId: n.parentId || defParent || null,
+        parentIds: Array.isArray(n.parentIds) ? n.parentIds : defParentIds,
         ipAddress: ip,
         macAddress: n.macAddress || '',
         os: n.os || '',
@@ -733,12 +768,14 @@ function importParsed(payload = {}) {
       const id = uid('n');
       try {
         insNode.run({
-          id, name: String(f.name).trim(), type: f.type, parent_id: f.parentId || null,
+          id, name: String(f.name).trim(), type: f.type, parent_id: null,
           ip_address: f.ipAddress || '', mac_address: f.macAddress || '', os: f.os || '',
           role: f.role || '', status: f.status, network_id: f.networkId || null,
           icon_type: f.iconType || '', icon_value: f.iconValue || '', notes: f.notes || '',
           pos_x: 0, pos_y: 0, last_seen: null, created_at: ts, updated_at: ts,
         });
+        validateParentIds(id, f.parentIds);
+        setParentsForNode(id, f.parentIds);
         setTagsForNode(id, f.tags || []);
       } catch (err) {
         result.nodes.skipped.push({ ref, name, reason: (mapDbError(err) || err).message });
@@ -778,6 +815,9 @@ function importParsed(payload = {}) {
       if (p.scheme !== undefined) portBody.scheme = p.scheme;
       if (p.hostPort !== undefined) portBody.hostPort = p.hostPort;
       if (p.targetNodeId !== undefined) portBody.targetNodeId = p.targetNodeId;
+      if (p.externalUrl !== undefined) portBody.externalUrl = p.externalUrl;
+      if (p.posX !== undefined) portBody.posX = p.posX;
+      if (p.posY !== undefined) portBody.posY = p.posY;
       const f = resolvePortFields(portBody, null);
       try {
         validatePortFields(f);
@@ -799,7 +839,8 @@ function importParsed(payload = {}) {
           service_name: f.serviceName || '', description: f.description || '', status: f.status,
           domain: f.domain || '', exposure: f.exposure, scheme: f.scheme,
           host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-          target_node_id: f.targetNodeId || null, last_seen: null, created_at: ts, updated_at: ts,
+          target_node_id: f.targetNodeId || null, external_url: f.externalUrl || '',
+          pos_x: Number(f.posX) || 0, pos_y: Number(f.posY) || 0, last_seen: null, created_at: ts, updated_at: ts,
         });
       } catch (err) {
         result.ports.skipped.push({ nodeId: targetNode, portNumber: Number(f.portNumber), protocol: f.protocol, reason: (mapDbError(err) || err).message });

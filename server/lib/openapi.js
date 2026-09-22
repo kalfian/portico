@@ -54,7 +54,7 @@ const spec = {
           id: { type: 'string' },
           name: { type: 'string' },
           type: { type: 'string', enum: ['physical', 'proxmox_host', 'vm', 'lxc', 'docker_host', 'container', 'network_device', 'iot'] },
-          parentId: { type: 'string', nullable: true },
+          parentIds: { type: 'array', items: { type: 'string' } },
           ipAddress: { type: 'string' },
           macAddress: { type: 'string' },
           os: { type: 'string' },
@@ -88,6 +88,9 @@ const spec = {
           scheme: { type: 'string', enum: ['http', 'https'] },
           hostPort: { type: 'integer', nullable: true },
           targetNodeId: { type: 'string', nullable: true },
+          externalUrl: { type: 'string', format: 'uri', description: 'Reliable absolute URL opened from this port.' },
+          posX: { type: 'number' },
+          posY: { type: 'number' },
           lastSeen: { type: 'string', nullable: true, description: 'ISO-8601 UTC time this port last accepted a TCP connect during a probe. Null = never.' },
           createdAt: { type: 'string' },
           updatedAt: { type: 'string' },
@@ -227,7 +230,7 @@ const spec = {
         properties: {
           nodes: { type: 'array', items: { $ref: '#/components/schemas/ImportPreviewNode' } },
           ports: { type: 'array', items: { $ref: '#/components/schemas/ImportPreviewPort' } },
-          parentId: { type: 'string', nullable: true, description: 'Default parent for created nodes' },
+          parentIds: { type: 'array', items: { type: 'string' }, description: 'Default parents for created nodes' },
           networkId: { type: 'string', nullable: true, description: 'Default network for created nodes' },
           nodeId: { type: 'string', nullable: true, description: 'Default target node for ports lacking node association (e.g. ss)' },
         },
@@ -263,7 +266,7 @@ const spec = {
     '/api/nodes/{id}': {
       get: { tags: ['nodes'], summary: 'Get node', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'OK', content: { 'application/json': { schema: { $ref: '#/components/schemas/Node' } } } }, 404: errorResponse } },
       put: { tags: ['nodes'], summary: 'Update node', security: [{ cookieAuth: [] }, { bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], requestBody: { content: { 'application/json': { schema: { $ref: '#/components/schemas/Node' } } } }, responses: { 200: { description: 'OK' }, 400: errorResponse, 404: errorResponse } },
-      delete: { tags: ['nodes'], summary: 'Delete node (children reparent to grandparent)', security: [{ cookieAuth: [] }, { bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'OK' }, 404: errorResponse } },
+      delete: { tags: ['nodes'], summary: 'Delete node and its containment edges', security: [{ cookieAuth: [] }, { bearerAuth: [] }], parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'OK' }, 404: errorResponse } },
     },
     '/api/nodes/{id}/ports': {
       get: { tags: ['ports'], summary: 'List ports for node', parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }], responses: { 200: { description: 'OK', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/Port' } } } } }, 404: errorResponse } },

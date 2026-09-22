@@ -24,6 +24,8 @@ const MIGRATIONS = [
   { version: 1, file: '001_init.sql' },
   { version: 2, file: '002_tokens.sql' },
   { version: 3, file: '003_last_seen.sql' },
+  { version: 4, file: '004_node_parents.sql' },
+  { version: 5, file: '005_port_graph_fields.sql' },
 ];
 
 function runMigrations() {

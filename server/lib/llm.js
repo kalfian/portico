@@ -16,12 +16,6 @@ function buildLlmContext() {
     if (!portsByNode.has(p.nodeId)) portsByNode.set(p.nodeId, []);
     portsByNode.get(p.nodeId).push(p);
   }
-  const childrenOf = new Map();
-  for (const n of nodes) {
-    const key = n.parentId || '__root__';
-    if (!childrenOf.has(key)) childrenOf.set(key, []);
-    childrenOf.get(key).push(n);
-  }
 
   const lines = [];
   lines.push('# Home Server Topology');
@@ -39,17 +33,15 @@ function buildLlmContext() {
     lines.push('');
   }
 
-  // Hierarchy
-  lines.push('## Topology (hosts → guests)');
-  const roots = (childrenOf.get('__root__') || []).slice().sort((a, b) => a.name.localeCompare(b.name));
-
-  const renderNode = (n, depth) => {
-    const indent = '  '.repeat(depth);
+  lines.push('## Nodes');
+  for (const n of nodes.slice().sort((a, b) => a.name.localeCompare(b.name))) {
     const net = n.networkId && netById.has(n.networkId) ? netById.get(n.networkId).name : null;
     const bits = [n.type, n.ipAddress || 'no-ip', `status:${n.status}`];
     if (net) bits.push(`net:${net}`);
     if (n.lastSeen) bits.push(`seen:${n.lastSeen}`);
-    lines.push(`${indent}- **${n.name}** (${bits.join(', ')})`);
+    const parents = n.parentIds.map((id) => nodeById.get(id)?.name || id);
+    if (parents.length) bits.push(`parents:${parents.join(', ')}`);
+    lines.push(`- **${n.name}** (${bits.join(', ')})`);
 
     const np = (portsByNode.get(n.id) || []).slice().sort((a, b) => a.portNumber - b.portNumber);
     const notable = np.filter((p) => p.exposure === 'public' || p.exposure === 'lan' || p.status === 'in_use');
@@ -66,14 +58,9 @@ function buildLlmContext() {
         }
         return s;
       });
-      lines.push(`${indent}  ports: ${desc.join(', ')}`);
+      lines.push(`  ports: ${desc.join(', ')}`);
     }
-
-    const kids = (childrenOf.get(n.id) || []).slice().sort((a, b) => a.name.localeCompare(b.name));
-    for (const k of kids) renderNode(k, depth + 1);
-  };
-
-  for (const r of roots) renderNode(r, 0);
+  }
   lines.push('');
 
   // Dependency links

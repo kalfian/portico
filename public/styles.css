@@ -700,6 +700,10 @@ select.input {
 .ntable tbody tr.is-selected { background: color-mix(in srgb, var(--accent) 10%, transparent); }
 .ntable tbody tr.is-selected td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
 .ntable td { padding: var(--sp-2) var(--sp-4); vertical-align: middle; white-space: nowrap; }
+.table-tree { margin-top: 4px; color: var(--fg-muted); font-size: 11px; white-space: normal; }
+.table-tree summary { cursor: pointer; color: var(--accent); }
+.table-tree__children, .table-tree__ports { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0 0 12px; }
+.table-tree__children button, .table-tree__ports a { border: 0; background: var(--surface-3); color: var(--fg-muted); border-radius: var(--r-pill); padding: 2px 7px; font: inherit; text-decoration: none; cursor: pointer; }
 .ntable td.tnum { text-align: right; font-variant-numeric: tabular-nums; }
 .ntable .muted { color: var(--fg-dim); }
 .ncell-name { display: flex; align-items: center; gap: var(--sp-2); font-weight: 600; color: var(--fg); max-width: 260px; }

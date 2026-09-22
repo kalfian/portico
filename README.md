@@ -1,17 +1,20 @@
 # Portico — Home Server Topology & Port Manager
 
-Self-hosted tool to **map your home-server topology** (which machine hosts which VM /
-LXC / container / device) and **track which ports are used vs free** on each node —
-so you always know your layout and your attack surface.
+Self-hosted tool to map a home-server topology as a **multi-parent directed acyclic graph
+(DAG)** and track every service port as a first-class graph entity. Use it to document
+physical hosts, VMs, containers, network devices, dependencies, and the exact URL behind
+each port.
 
 ![Portico topology graph — hosts, guests, ports and typed dependency edges](docs/screenshot-graph.png)
 
-- 🗺️ Interactive topology graph (containment + typed dependency edges: proxy / mount / dns)
-- 🔌 Per-node port inventory with **free-port** and **free-IP** finders
+- 🗺️ Multi-level, many-to-many topology graph with cycle prevention
+- 🔌 Ports rendered as distinct graph cards, with a reliable external **Go to** URL
+- ↔️ Drag nodes and ports freely; positions persist only while editing
+- 📋 Collapsible table hierarchy for parent/child nodes and their ports
 - 🌐 Networks / VLANs, exposure levels (`internal` / `lan` / `public`), duplicate-IP/MAC/port conflict detection
 - 🩺 Active **health check** (TCP/HTTP probe → live status + "last seen")
 - 📥 **Import** from `docker ps`, `ss`, Proxmox `qm/pct list`, or `nmap` (parse → preview → apply)
-- 🤖 **LLM-friendly**: OpenAPI spec + one-call context endpoint + scoped API tokens
+- 🤖 **LLM-friendly**: REST, OpenAPI, one-call context, scoped tokens, and MCP tools
 - 🔒 Single-password gate (read-only until you log in) · runs great in Docker
 
 Stack: Node + Express + SQLite (better-sqlite3), vanilla vis-network frontend. No cloud, no telemetry, works air-gapped.
@@ -51,12 +54,15 @@ docker compose up -d --build
 ```bash
 git clone https://github.com/kalfian/portico.git && cd portico
 npm install
-npm start          # or: npm run dev  (auto-restart on change)
+npm test           # run the Node test suite
+npm run dev        # start with auto-restart on change
+# npm start        # start without file watching
 # → http://localhost:3000
 ```
 
 On first boot the DB is created at `data/topology.db` (WAL mode) and **seeded with a
-sample topology** so you have something to look at immediately. Delete `data/` to reset.
+sample topology**: Internet → Mikrotik Router → two devices, with two service ports shown
+as graph cards under Device 2. Use **data menu → Reset sample data** to restore it.
 
 ---
 
@@ -97,7 +103,7 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/topology
 # create a node (needs read_write)
 curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -X POST http://localhost:3000/api/nodes \
-  -d '{"name":"new-vm","type":"vm","ipAddress":"10.20.30.40","parentId":"n-dialga"}'
+  -d '{"name":"new-vm","type":"vm","ipAddress":"10.20.30.40","parentIds":["n-device-2"]}'
 ```
 
 **Errors** are always `{ "error": { "code": "...", "message": "..." } }` with a matching
@@ -106,6 +112,70 @@ JSON is camelCase everywhere.
 
 > Tip for agents: `GET /api/llm/context` to orient, `GET /api/openapi.json` to learn the
 > exact request shapes, then act with a `read_write` token. Reads never need a token.
+
+### MCP
+
+Portico exposes a stateless JSON-RPC MCP endpoint at `POST /mcp`. Create an API token in
+**data menu → API tokens**, then configure an HTTP-capable MCP client with:
+
+```json
+{
+  "mcpServers": {
+    "portico": {
+      "url": "http://localhost:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PORTICO_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Client configuration formats vary. The required transport contract is HTTP `POST`, JSON
+content, and `Authorization: Bearer $PORTICO_TOKEN` on authenticated requests. Portico
+advertises MCP protocol version `2025-03-26`; `initialize` may be called without a token,
+while tool discovery and calls require one.
+
+| Tool | Minimum scope | Arguments |
+|---|---|---|
+| `topology_get` | `read` | `{}` |
+| `node_create` | `read_write` | `{ "node": { ... } }` |
+| `node_update` | `read_write` | `{ "id": "...", "node": { ... } }` |
+| `node_delete` | `read_write` | `{ "id": "..." }` |
+| `port_create` | `read_write` | `{ "nodeId": "...", "port": { ... } }` |
+| `port_update` | `read_write` | `{ "id": "...", "port": { ... } }` |
+| `port_delete` | `read_write` | `{ "id": "..." }` |
+
+Initialize and inspect the available tools:
+
+```bash
+curl http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+
+curl http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PORTICO_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+```
+
+Read the topology or create a port card with an explicit external URL:
+
+```bash
+curl http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PORTICO_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"topology_get","arguments":{}}}'
+
+curl http://localhost:3000/mcp \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $PORTICO_TOKEN" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"port_create","arguments":{"nodeId":"n-device-2","port":{"portNumber":3000,"protocol":"tcp","serviceName":"Dashboard","scheme":"http","exposure":"lan","status":"in_use","externalUrl":"http://10.20.30.3:3000"}}}}'
+```
+
+Tool results include both MCP text content and `structuredContent`. A `read` token may list
+tools and call `topology_get`; mutation attempts return JSON-RPC error `-32003`. Use the REST
+API and `GET /api/openapi.json` for networks, typed links, import, probes, and token management.
 
 ---
 
@@ -199,7 +269,7 @@ Two steps so you review before anything is written (both require auth):
   carry a `ref`; preview ports link via `nodeRef` (except `ss` ports → `nodeRef:null`, you
   pick their node at apply time).
 - `POST /api/import/apply` — the previewed (optionally edited) payload
-  `{ nodes, ports, parentId?, networkId?, nodeId? }`. Additive, one transaction, de-duped
+  `{ nodes, ports, parentIds?, networkId?, nodeId? }`. Additive, one transaction, de-duped
   (nodes by name **or** IP, ports by `(node, port, protocol)`). Returns created vs skipped.
 
 Supported inputs: `docker ps` (table **or** `--format '{{json .}}'`) → containers + published
@@ -231,17 +301,17 @@ per commit, and `X.Y.Z` / `X.Y` when you push a `vX.Y.Z` tag (`git tag v1.0.0 &&
 
 - **Frontend** (`public/`) — vanilla JS + vendored vis-network (no CDN), loads state from
   `GET /api/topology`, sends every change through the API, gates editing on the server session.
-  Graph + table views, managers, finders, search, animated edges, per-node selfh.st icons
-  (via the `/api/icons` caching proxy → air-gap friendly), responsive, reduced-motion aware.
+  Graph cards represent both nodes and ports. Edit-mode drag saves positions; read-only drag is
+  temporary and resets on reload. The table view collapses nodes, children, and ports.
 - **Backend** (`server/`) — Express + better-sqlite3, hand-written SQL migrations in
   `server/migrations/` applied on boot inside a transaction (tracked via `PRAGMA user_version`;
-  `WAL` + `foreign_keys` on). Entities: `nodes` (self-referential, `parent_id` FK SET NULL),
-  `ports` (FK CASCADE, `UNIQUE(node_id, port_number, protocol)`), `networks`, `links`,
-  `tags`+`node_tags`, plus `auth` and `api_tokens`. JSON camelCase ↔ DB snake_case in
-  `server/lib/mappers.js`. Server-side guards: port uniqueness, parent-cycle prevention,
-  IPv4 validation, enum whitelisting, reparent-to-grandparent on node delete.
-- **Seed** (`server/seed.js`) — runs only when the DB is empty, replicating a realistic
-  sample homelab (Proxmox host + guests, docker host + containers, router/AP/IoT, networks,
-  links, and selfh.st icon slugs).
+  `WAL` + `foreign_keys` on). `node_parents` stores many-to-many containment edges; `ports`
+  belong to one node and store `external_url`, `pos_x`, and `pos_y`. Other entities include
+  `networks`, typed `links`, `tags`+`node_tags`, `auth`, and `api_tokens`. Server-side guards
+  enforce DAG cycles, unique `(node, port, protocol)` values, URLs, IPv4 values, and enums.
+- **Automation** — REST routes under `/api`, OpenAPI at `/api/openapi.json`, compact LLM
+  context at `/api/llm/context`, and MCP JSON-RPC tools at `/mcp` share the same store rules.
+- **Seed** (`server/seed.js`) — runs only when the DB is empty and creates the documented
+  Internet → router → devices example, including two port cards attached to Device 2.
 
 `prototype/index.html` is the original standalone (localStorage-only) prototype, kept for reference.

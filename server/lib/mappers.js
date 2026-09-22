@@ -3,12 +3,12 @@
 // The one place that translates between snake_case DB rows and camelCase JSON.
 // `tags` is joined in separately (node_tags) — callers pass the tag name array.
 
-function nodeToApi(row, tags = []) {
+function nodeToApi(row, tags = [], parentIds = []) {
   return {
     id: row.id,
     name: row.name,
     type: row.type,
-    parentId: row.parent_id,
+    parentIds,
     ipAddress: row.ip_address,
     macAddress: row.mac_address,
     os: row.os,
@@ -41,6 +41,9 @@ function portToApi(row) {
     scheme: row.scheme,
     hostPort: row.host_port,
     targetNodeId: row.target_node_id,
+    externalUrl: row.external_url,
+    posX: row.pos_x,
+    posY: row.pos_y,
     lastSeen: row.last_seen ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

@@ -50,6 +50,7 @@ app.use('/api', require('./routes/probe'));
 app.use('/api', require('./routes/import'));
 app.use('/api', require('./routes/icons'));
 app.use('/api', require('./routes/data'));
+app.use('/mcp', require('./routes/mcp'));
 
 // Unknown API route → JSON 404 (don't fall through to static/index.html).
 app.use('/api', (req, res) => res.status(404).json({ error: { code: 'not_found', message: 'Not found' } }));

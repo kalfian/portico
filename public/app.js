@@ -80,7 +80,7 @@ async function lockEdit() {
 function applyLockState() {
   document.body.classList.toggle('locked', !canEdit());
   updateAuthBadge();
-  if (typeof network !== 'undefined' && network) network.setOptions({ interaction: { dragNodes: canEdit() } });
+  if (typeof network !== 'undefined' && network) network.setOptions({ interaction: { dragNodes: true } });
   if (typeof renderDetail === 'function') renderDetail();   // re-render edit/delete affordances
 }
 function updateAuthBadge() {
@@ -112,6 +112,7 @@ const TYPE_ORDER = ['physical','proxmox_host','vm','lxc','docker_host','containe
 /* ---- id helper (client-side sample seed only; server assigns ids on create) ---- */
 const uid = (p='id') => p + '-' + Math.random().toString(36).slice(2, 9);
 const nodeById = (id) => state.nodes.find(n => n.id === id);
+const portById = (id) => state.ports.find(p => p.id === id);
 
 /* ---- exposure enum metadata (single source) ---- */
 const EXPOSURE = {
@@ -254,6 +255,8 @@ function normalizeState(d) {
   if (!Array.isArray(d.networks)) d.networks = [];
   if (!Array.isArray(d.links)) d.links = [];
   (d.nodes || []).forEach(n => {
+    if (!Array.isArray(n.parentIds)) n.parentIds = n.parentId ? [n.parentId] : [];
+    delete n.parentId;
     if (!Array.isArray(n.tags)) n.tags = [];
     if (n.networkId === undefined) n.networkId = null;
     if (!['selfhst', 'builtin', 'url', 'upload'].includes(n.iconType)) n.iconType = '';
@@ -330,6 +333,25 @@ function seedData() {
   return normalizeState({ nodes, ports, networks, links });
 }
 
+function seedData() {
+  const internet = 'n-internet', mikrotik = 'n-mikrotik';
+  const device1 = 'n-device-1', device2 = 'n-device-2';
+  return normalizeState({
+    nodes: [
+      { id: internet, name: 'Internet', type: 'network_device', parentIds: [], ipAddress: '', status: 'up', role: 'WAN', tags: ['internet', 'wan'], posX: 0, posY: -300, iconType: 'builtin', iconValue: 'wifi' },
+      { id: mikrotik, name: 'Mikrotik Router', type: 'network_device', parentIds: [internet], ipAddress: '10.20.30.1', status: 'up', role: 'Gateway / DHCP / firewall', tags: ['router', 'core'], posX: 0, posY: -120, iconType: 'selfhst', iconValue: 'mikrotik', networkId: 'nw-lan' },
+      { id: device1, name: 'Device 1', type: 'physical', parentIds: [mikrotik], ipAddress: '10.20.30.2', status: 'up', role: 'LAN device', tags: ['device'], posX: -250, posY: 70, iconType: 'builtin', iconValue: 'host', networkId: 'nw-lan' },
+      { id: device2, name: 'Device 2', type: 'physical', parentIds: [mikrotik], ipAddress: '10.20.30.3', status: 'up', role: 'LAN device', tags: ['device'], notes: 'Hosts Device 3 and Device 4 service endpoints.', posX: 210, posY: 70, iconType: 'builtin', iconValue: 'host', networkId: 'nw-lan' },
+    ],
+    ports: [
+      { id: 'p-device-3', nodeId: device2, portNumber: 8080, protocol: 'tcp', serviceName: 'Device 3', description: 'Application endpoint on Device 2', status: 'in_use', exposure: 'lan', scheme: 'http', externalUrl: 'http://10.20.30.3:8080', posX: 390, posY: 40 },
+      { id: 'p-device-4', nodeId: device2, portNumber: 9100, protocol: 'tcp', serviceName: 'Device 4', description: 'Metrics endpoint on Device 2', status: 'in_use', exposure: 'internal', scheme: 'http', externalUrl: 'http://10.20.30.3:9100', posX: 390, posY: 115 },
+    ],
+    networks: [{ id: 'nw-lan', name: 'home-lan', cidr: '10.20.30.0/24', vlanId: 30, color: '#2dd4bf' }],
+    links: [],
+  });
+}
+
 /* ================= STATE ================= */
 let state = { nodes: [], ports: [], networks: [], links: [] };
 let selectedId = null;
@@ -359,10 +381,19 @@ async function reloadState() {
 /* debounced position persistence for node drags */
 const _posSaveTimers = {};
 function saveNodePosition(id) {
+  if (!canEdit()) return;
   clearTimeout(_posSaveTimers[id]);
   _posSaveTimers[id] = setTimeout(() => {
     const n = nodeById(id); if (!n) return;
     api.updateNode(id, { posX: n.posX, posY: n.posY }).catch(e => toast('Could not save position: ' + e.message, 'err'));
+  }, 500);
+}
+function savePortPosition(id) {
+  if (!canEdit()) return;
+  clearTimeout(_posSaveTimers[id]);
+  _posSaveTimers[id] = setTimeout(() => {
+    const p = portById(id); if (!p) return;
+    api.updatePort(id, { posX: p.posX, posY: p.posY }).catch(e => toast('Could not save port position: ' + e.message, 'err'));
   }, 500);
 }
 
@@ -381,8 +412,8 @@ function nodeColor(n) {
 function relatedIds(id) {
   const s = new Set([id]);
   const n = nodeById(id);
-  if (n && n.parentId) s.add(n.parentId);
-  state.nodes.forEach(x => { if (x.parentId === id) s.add(x.id); });
+  if (n) n.parentIds.forEach(parentId => s.add(parentId));
+  state.nodes.forEach(x => { if (x.parentIds.includes(id)) s.add(x.id); });
   state.links.forEach(l => { if (l.fromNodeId === id) s.add(l.toNodeId); if (l.toNodeId === id) s.add(l.fromNodeId); });
   return s;
 }
@@ -396,13 +427,8 @@ function nodeVis(n) {
   const border = col;
   const bg = mix(col, '#0b0e14', dim ? 0.88 : 0.82);
   const ip = (n.ipAddress || '').trim();
-  const inUse = portsFor(n.id).filter(p => p.status === 'in_use').sort((a, b) => a.portNumber - b.portNumber);
-  const portsLine = inUse.length
-    ? inUse.slice(0, 4).map(p => ':' + p.portNumber).join(' ') + (inUse.length > 4 ? ' +' + (inUse.length - 4) : '')
-    : '';
   const lines = [n.name];
   if (ip) lines.push('`' + ip + '`');
-  if (portsLine) lines.push('`' + portsLine + '`');
   const label = lines.join('\n');
   const base = {
     id: n.id,
@@ -446,19 +472,57 @@ function nodeVis(n) {
     shapeProperties: { borderRadius: 9 },
   });
 }
-function edgeVis(n) {
+function edgeVis(parentId, n) {
   const child = TYPES[n.type] || { color: '#39424f' };
-  const parent = state.nodes.find(x => x.id === n.parentId);
+  const parent = nodeById(parentId);
   const isNet = parent && parent.type === 'network_device';
   const col = mix(child.color, '#0b0e14', 0.46);
-  const incident = !(focusSet && selectedId) || n.parentId === selectedId || n.id === selectedId;
+  const incident = !(focusSet && selectedId) || parentId === selectedId || n.id === selectedId;
   return {
-    id: 'e-' + n.id, from: n.parentId, to: n.id,
+    id: `e-${parentId}-${n.id}`, from: parentId, to: n.id,
     arrows: { to: { enabled: true, scaleFactor: 0.45, type: 'arrow' } },
     color: { color: col, highlight: child.color, hover: mix(child.color, '#0b0e14', 0.2), opacity: incident ? 0.9 : 0.08 },
     dashes: isNet ? [4, 4] : false,
     smooth: { enabled: true, type: 'cubicBezier', forceDirection: 'vertical', roundness: 0.62 },
     width: 1.3, selectionWidth: 1.4, hoverWidth: 0.6,
+  };
+}
+function portVis(p) {
+  const owner = nodeById(p.nodeId);
+  const siblings = portsFor(p.nodeId);
+  const index = Math.max(0, siblings.findIndex(x => x.id === p.id));
+  const fallbackX = (owner?.posX || 0) + 180;
+  const fallbackY = (owner?.posY || 0) + (index - (siblings.length - 1) / 2) * 58;
+  const color = p.exposure === 'public' ? '#f87171' : p.exposure === 'lan' ? '#fbbf24' : '#2dd4bf';
+  return {
+    id: p.id,
+    label: `${p.serviceName || 'Port'}\nPORT ${p.portNumber}/${p.protocol.toUpperCase()}`,
+    x: p.posX || fallbackX,
+    y: p.posY || fallbackY,
+    shape: 'box',
+    margin: 12,
+    widthConstraint: { minimum: 118, maximum: 170 },
+    borderWidth: 2,
+    borderWidthSelected: 3,
+    opacity: 1,
+    color: {
+      background: '#161b24',
+      border: color,
+      highlight: { background: '#1c222d', border: color },
+      hover: { background: '#1c222d', border: color },
+    },
+    font: { color: '#eef2f7', size: 13, face: 'SFMono-Regular, monospace', align: 'center' },
+    shadow: { enabled: true, color: rgba(color, .3), size: 12, x: 0, y: 5 },
+  };
+}
+function portEdgeVis(p) {
+  const color = p.exposure === 'public' ? '#f87171' : p.exposure === 'lan' ? '#fbbf24' : '#2dd4bf';
+  return {
+    id: `port-${p.id}`, from: p.nodeId, to: p.id,
+    arrows: { to: { enabled: true, scaleFactor: .45, type: 'arrow' } },
+    color: { color, highlight: color, hover: color, opacity: .72 },
+    dashes: [5, 5], width: 1.4,
+    smooth: { enabled: true, type: 'curvedCW', roundness: .14 },
   };
 }
 function linkVis(lk) {
@@ -477,47 +541,53 @@ function linkVis(lk) {
 }
 function buildEdges() {
   const edges = [];
-  if (edgeToggles.containment) state.nodes.filter(n => n.parentId).forEach(n => edges.push(edgeVis(n)));
+  if (edgeToggles.containment) state.nodes.forEach(n => n.parentIds.forEach(parentId => edges.push(edgeVis(parentId, n))));
+  state.ports.filter(p => nodeById(p.nodeId)).forEach(p => edges.push(portEdgeVis(p)));
   state.links.forEach(lk => { if (edgeToggles[lk.type] !== false && nodeById(lk.fromNodeId) && nodeById(lk.toNodeId)) edges.push(linkVis(lk)); });
   return edges;
 }
 function refreshEdges() { if (edgesDS) { edgesDS.clear(); edgesDS.add(buildEdges()); } startFlow(); }
 
 function buildGraph() {
-  nodesDS = new vis.DataSet(state.nodes.map(nodeVis));
+  nodesDS = new vis.DataSet([...state.nodes.map(nodeVis), ...state.ports.map(portVis)]);
   edgesDS = new vis.DataSet(buildEdges());
   const container = document.getElementById('graph');
   network = new vis.Network(container, { nodes: nodesDS, edges: edgesDS }, {
     autoResize: true,
     layout: { improvedLayout: true },
     physics: false,
-    interaction: { hover: true, dragNodes: canEdit(), dragView: true, zoomView: false, tooltipDelay: 120, navigationButtons: false, keyboard: false },
+    interaction: { hover: true, dragNodes: true, dragView: true, zoomView: false, tooltipDelay: 120, navigationButtons: false, keyboard: false },
     nodes: { chosen: true },
   });
   setupSmoothZoom(container);
   network.on('afterDrawing', (ctx) => drawFlow(ctx));
   network.on('click', (params) => {
-    if (params.nodes.length) select(params.nodes[0]);
+    if (params.nodes.length) {
+      const port = portById(params.nodes[0]);
+      if (port) { select(port.nodeId); setTimeout(() => highlightPort(port.id), 0); }
+      else select(params.nodes[0]);
+    }
     else { selectedId = null; focusSet = null; network.unselectAll(); syncGraph(); closeSidebar(); renderDetail(); markTableSelection(); }
   });
   network.on('dragEnd', (params) => {
-    if (!canEdit()) return;   // read-only: don't persist positions (dragNodes is also disabled)
+    if (!canEdit()) return;
     if (!params.nodes.length) return;
     params.nodes.forEach(id => {
       const pos = network.getPositions([id])[id];
-      const n = state.nodes.find(x => x.id === id);
+      const n = nodeById(id); const p = portById(id);
       if (n && pos) { n.posX = Math.round(pos.x); n.posY = Math.round(pos.y); saveNodePosition(id); }
+      if (p && pos) { p.posX = Math.round(pos.x); p.posY = Math.round(pos.y); savePortPosition(id); }
     });
   });
   const graphEl = document.getElementById('graph');
   if (!REDUCE) {
     network.on('hoverNode', (p) => {
-      const n = state.nodes.find(x => x.id === p.node); if (!n) return;
+      const n = nodeById(p.node); if (!n) { graphEl.style.cursor = 'pointer'; return; }
       const t = TYPES[n.type] || { color: '#7c8aa0', level: 0 }; const isHost = (t.level || 0) === 0;
       nodesDS.update({ id: p.node, shadow: { enabled: true, color: rgba(nodeColor(n), .5), size: isHost ? 28 : 18, x: 0, y: isHost ? 11 : 7 } });
       graphEl.style.cursor = 'pointer';
     });
-    network.on('blurNode', (p) => { refreshGraphNode(p.node); graphEl.style.cursor = 'default'; });
+    network.on('blurNode', (p) => { if (nodeById(p.node)) refreshGraphNode(p.node); graphEl.style.cursor = 'default'; });
   } else {
     network.on('hoverNode', () => { graphEl.style.cursor = 'pointer'; });
     network.on('blurNode', () => { graphEl.style.cursor = 'default'; });
@@ -534,7 +604,7 @@ let flowRAF = 0, flowLastDraw = 0, tabHidden = false;
 const FLOW_FRAME_MS = 33;
 const FLOW_PERIOD = 2600;
 function hasVisibleEdges() {
-  if (edgeToggles.containment && state.nodes.some(n => n.parentId)) return true;
+  if (edgeToggles.containment && state.nodes.some(n => n.parentIds.length)) return true;
   return state.links.some(l => edgeToggles[l.type] !== false && nodeById(l.fromNodeId) && nodeById(l.toNodeId));
 }
 function startFlow() {
@@ -576,7 +646,8 @@ function drawFlow(ctx) {
       ctx.fill();
     }
   };
-  if (edgeToggles.containment) state.nodes.forEach(n => { if (n.parentId && !isDimmed(n.id) && !isDimmed(n.parentId)) drawEdge(n.parentId, n.id, '#6b7686', false); });
+  if (edgeToggles.containment) state.nodes.forEach(n => n.parentIds.forEach(parentId => { if (!isDimmed(n.id) && !isDimmed(parentId)) drawEdge(parentId, n.id, '#6b7686', false); }));
+  state.ports.forEach(p => drawEdge(p.nodeId, p.id, '#465262', false));
   state.links.forEach(l => {
     if (edgeToggles[l.type] === false) return;
     if (focusSet && selectedId && l.fromNodeId !== selectedId && l.toNodeId !== selectedId) return;
@@ -639,7 +710,7 @@ function smoothZoomBy(factor) {
 }
 
 function syncGraph() {
-  nodesDS.clear(); nodesDS.add(state.nodes.map(nodeVis));
+  nodesDS.clear(); nodesDS.add([...state.nodes.map(nodeVis), ...state.ports.map(portVis)]);
   edgesDS.clear(); edgesDS.add(buildEdges());
   if (selectedId && state.nodes.some(n => n.id === selectedId)) network.selectNodes([selectedId]);
 }
@@ -655,9 +726,18 @@ function autoArrange() {
   network.setOptions({ layout: { hierarchical: { enabled: true, direction: 'UD', sortMethod: 'directed', levelSeparation: 150, nodeSpacing: 150, treeSpacing: 180 } } });
   network.once('afterDrawing', async () => {
     const pos = network.getPositions();
+    const placed = [];
+    Object.keys(pos).sort().forEach(id => {
+      const point = pos[id];
+      while (placed.some(other => Math.hypot(other.x - point.x, other.y - point.y) < 96)) point.y += 108;
+      placed.push(point);
+    });
     const updates = [];
     state.nodes.forEach(n => {
       if (pos[n.id]) { n.posX = Math.round(pos[n.id].x); n.posY = Math.round(pos[n.id].y); updates.push(api.updateNode(n.id, { posX: n.posX, posY: n.posY })); }
+    });
+    state.ports.forEach(p => {
+      if (pos[p.id]) { p.posX = Math.round(pos[p.id].x); p.posY = Math.round(pos[p.id].y); updates.push(api.updatePort(p.id, { posX: p.posX, posY: p.posY })); }
     });
     network.setOptions({ layout: { hierarchical: { enabled: false } } });
     syncGraph();
@@ -814,11 +894,15 @@ function tableRowHtml(n) {
     ? (() => { const key = st.expRank === 3 ? 'public' : st.expRank === 2 ? 'lan' : 'internal'; const e = EXPOSURE[key]; return `<span class="tag ${e.cls}" title="${esc(e.tip)}">${e.label}</span>`; })()
     : '<span class="muted">—</span>';
   const cls = [hasConf ? 'row-warn' : '', selectedId === n.id ? 'is-selected' : ''].filter(Boolean).join(' ');
+  const children = state.nodes.filter(child => child.parentIds.includes(n.id));
+  const ports = portsFor(n.id);
+  const nested = (children.length || ports.length) ? `<details class="table-tree"><summary>${children.length} child node${children.length === 1 ? '' : 's'} · ${ports.length} port${ports.length === 1 ? '' : 's'}</summary>${children.length ? `<div class="table-tree__children">${children.map(child => `<button type="button" data-goto-node="${child.id}">${esc(child.name)}</button>`).join('')}</div>` : ''}${ports.length ? `<details class="table-tree__ports"><summary>Ports</summary>${ports.map(port => `<a href="${esc(portUrl(n, port) || '#')}" ${portUrl(n, port) ? 'target="_blank" rel="noopener noreferrer"' : ''}>:${port.portNumber}/${esc(port.protocol)}${port.serviceName ? ` · ${esc(port.serviceName)}` : ''}</a>`).join('')}</details>` : ''}</details>` : '';
   return `<tr data-id="${n.id}" tabindex="0" role="button" aria-label="Open ${esc(n.name)}"${cls ? ` class="${cls}"` : ''}>
     <td><div class="ncell-name">
       ${src ? `<span class="tv-avatar"><img src="${esc(src)}" alt="" onerror="this.closest('.tv-avatar').style.display='none'"></span>` : ''}
       <span class="tv-name">${esc(n.name)}</span>
       ${hasConf ? `<span class="tv-warn" title="This node has a conflict">${WARN_ICON}</span>` : ''}
+      ${nested}
     </div></td>
     <td><span class="tv-type" style="color:${t.color}"><span class="cmd__dot" style="background:${t.color}"></span>${esc(t.label)}</span></td>
     <td>${ip ? `<span class="tv-mono">${esc(ip)}</span>` : '<span class="muted">—</span>'}</td>
@@ -927,8 +1011,8 @@ function renderDetail() {
     return;
   }
   const t = TYPES[n.type] || { label: n.type, color: '#7c8aa0' };
-  const parent = state.nodes.find(x => x.id === n.parentId);
-  const kids = state.nodes.filter(x => x.parentId === n.id);
+  const parents = n.parentIds.map(nodeById).filter(Boolean);
+  const kids = state.nodes.filter(x => x.parentIds.includes(n.id));
   const statusMap = { up: 'up', down: 'down', unknown: 'unknown' };
   const sc = statusMap[n.status] || 'unknown';
   const ip = (n.ipAddress || '').trim();
@@ -974,7 +1058,7 @@ function renderDetail() {
       <dl class="dl">
         <dt>MAC</dt><dd class="mono ${n.macAddress?'':'muted'}">${n.macAddress ? `<button class="copy mono" data-copy="${esc(n.macAddress)}" title="Copy">${esc(n.macAddress)}</button>` : '—'}</dd>
         <dt>OS</dt><dd class="${n.os?'':'muted'}">${esc(n.os) || '—'}</dd>
-        <dt>Parent</dt><dd>${parent ? `<button class="copy" data-goto="${parent.id}">${esc(parent.name)}</button>` : '<span class="muted">— root</span>'}</dd>
+        <dt>Parents</dt><dd>${parents.length ? parents.map(parent => `<button class="copy" data-goto="${parent.id}">${esc(parent.name)}</button>`).join(', ') : '<span class="muted">— root</span>'}</dd>
         ${kids.length ? `<dt>Children</dt><dd>${kids.map(k=>`<button class="copy" data-goto="${k.id}">${esc(k.name)}</button>`).join(', ')}</dd>` : ''}
         <dt>Last seen</dt><dd class="${relativeTime(n.lastSeen) ? '' : 'muted'}">${(() => { const rel = relativeTime(n.lastSeen); return rel ? `<span class="seen-dot ${freshnessClass(n.lastSeen)}"></span>${esc(rel)}<span class="seen-abs"> · ${esc(absTime(n.lastSeen))}</span>` : 'never probed'; })()}</dd>
       </dl>
@@ -1003,6 +1087,7 @@ function portsFor(nodeId) {
 }
 function portUrl(n, p) {
   if (p.status !== 'in_use') return null;
+  if (p.externalUrl) return p.externalUrl;
   const scheme = p.scheme || inferScheme(p);
   if (p.domain) return scheme + '://' + p.domain;
   const ip = (n.ipAddress || '').trim();
@@ -1019,7 +1104,7 @@ function nodeUrl(n) {
 function publishHostId(p) {
   const n = nodeById(p.nodeId); if (!n) return p.nodeId;
   const hostTypes = ['physical', 'proxmox_host', 'docker_host', 'network_device'];
-  return hostTypes.includes(n.type) ? n.id : (n.parentId || n.id);
+  return hostTypes.includes(n.type) ? n.id : (n.parentIds[0] || n.id);
 }
 function computeConflicts() {
   const out = [];
@@ -1301,11 +1386,10 @@ document.addEventListener('keydown', (e) => {
 function openNodeModal(id = null) {
   if (!requireEdit()) return;
   const editing = id ? state.nodes.find(n => n.id === id) : null;
-  const n = editing || { name:'', type:'physical', parentId:'', ipAddress:'', macAddress:'', os:'', role:'', status:'up', notes:'', networkId:null, iconType:'', iconValue:'' };
+  const n = editing || { name:'', type:'physical', parentIds:[], ipAddress:'', macAddress:'', os:'', role:'', status:'up', notes:'', networkId:null, iconType:'', iconValue:'' };
   const typeOpts = TYPE_ORDER.map(k => `<option value="${k}" ${n.type===k?'selected':''}>${TYPES[k].label}</option>`).join('');
   const banned = editing ? descendantIds(id).add(id) : new Set();
-  const parentOpts = ['<option value="">— none (root)</option>']
-    .concat(state.nodes.filter(x => !banned.has(x.id)).map(x => `<option value="${x.id}" ${n.parentId===x.id?'selected':''}>${esc(x.name)} · ${TYPES[x.type].label}</option>`)).join('');
+  const parentOpts = state.nodes.filter(x => !banned.has(x.id)).map(x => `<option value="${x.id}" ${(n.parentIds || []).includes(x.id)?'selected':''}>${esc(x.name)} · ${TYPES[x.type].label}</option>`).join('');
   const netOpts = ['<option value="">— none</option>']
     .concat(state.networks.map(w => `<option value="${w.id}" ${n.networkId===w.id?'selected':''}>${esc(w.name)}${w.vlanId!=null?` · vlan ${w.vlanId}`:''} · ${esc(w.cidr)}</option>`)).join('');
 
@@ -1334,9 +1418,9 @@ function openNodeModal(id = null) {
           </select>
         </div>
         <div class="form-field full">
-          <label for="f-parent">Parent node</label>
-          <select class="input" id="f-parent">${parentOpts}</select>
-          <div class="hint">Sets the containment edge (host → guest / container).</div>
+          <label for="f-parent">Parent nodes</label>
+          <select class="input" id="f-parent" multiple size="5">${parentOpts}</select>
+          <div class="hint">Select every containment parent. The topology remains acyclic.</div>
         </div>
         <div class="form-field full">
           <label for="f-network">Network</label>
@@ -1479,7 +1563,7 @@ function openNodeModal(id = null) {
     const data = {
       name,
       type: document.getElementById('f-type').value,
-      parentId: document.getElementById('f-parent').value || null,
+      parentIds: [...document.getElementById('f-parent').selectedOptions].map(option => option.value),
       ipAddress: document.getElementById('f-ip').value.trim(),
       macAddress: document.getElementById('f-mac').value.trim(),
       os: document.getElementById('f-os').value.trim(),
@@ -1500,7 +1584,7 @@ function openNodeModal(id = null) {
         const updated = await api.updateNode(id, data);
         replaceNode(updated);
       } else {
-        const parent = data.parentId ? nodeById(data.parentId) : null;
+        const parent = data.parentIds[0] ? nodeById(data.parentIds[0]) : null;
         data.posX = parent ? Math.round((parent.posX || 0) + (Math.random()*120 - 60)) : Math.round(Math.random()*200 - 100);
         data.posY = parent ? (parent.posY || 0) + 150 : 0;
         const created = await api.createNode(data);
@@ -1528,7 +1612,7 @@ function openNodeModal(id = null) {
 
 function descendantIds(id) {
   const out = new Set();
-  const walk = (pid) => state.nodes.filter(n => n.parentId === pid).forEach(c => { if (!out.has(c.id)) { out.add(c.id); walk(c.id); } });
+  const walk = (pid) => state.nodes.filter(n => n.parentIds.includes(pid)).forEach(c => { if (!out.has(c.id)) { out.add(c.id); walk(c.id); } });
   walk(id); return out;
 }
 
@@ -1538,7 +1622,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
   if (!nodeId) { toast('Select a node first', 'err'); return; }
   const node = state.nodes.find(n => n.id === nodeId);
   const editing = portId ? state.ports.find(p => p.id === portId) : null;
-  const p = editing || { portNumber:'', protocol:'tcp', serviceName:'', description:'', domain:'', exposure:'internal', scheme:'http', hostPort:null, targetNodeId:null, status:'in_use' };
+  const p = editing || { portNumber:'', protocol:'tcp', serviceName:'', description:'', domain:'', externalUrl:'', exposure:'internal', scheme:'http', hostPort:null, targetNodeId:null, status:'in_use' };
   const fwdOpts = ['<option value="">— none</option>']
     .concat(state.nodes.filter(x => x.id !== nodeId).map(x => `<option value="${x.id}" ${p.targetNodeId === x.id ? 'selected' : ''}>${esc(x.name)} · ${TYPES[x.type].label}</option>`)).join('');
 
@@ -1573,6 +1657,11 @@ function openPortModal(nodeId = selectedId, portId = null) {
           <label for="f-domain">Public domain</label>
           <input class="input" id="f-domain" value="${esc(p.domain || '')}" placeholder="service.example.com" autocomplete="off" inputmode="url">
           <div class="hint">Optional — e.g. a Cloudflare Tunnel hostname mapped to this ip:port. Marks the port as internet-reachable.</div>
+        </div>
+        <div class="form-field full">
+          <label for="f-external-url">External URL</label>
+          <input class="input" id="f-external-url" value="${esc(p.externalUrl || '')}" placeholder="https://service.example.com/path" autocomplete="off" inputmode="url">
+          <div class="hint">The exact URL opened from this port. It takes precedence over inferred IP or domain links.</div>
         </div>
         <div class="form-field">
           <label for="f-exposure">Exposure</label>
@@ -1640,6 +1729,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
       scheme: document.getElementById('f-scheme').value,
       hostPort,
       targetNodeId: document.getElementById('f-target').value || null,
+      externalUrl: document.getElementById('f-external-url').value.trim(),
       status: document.getElementById('f-pstatus').value,
     };
     const saveBtn = document.getElementById('portSave');
@@ -1647,7 +1737,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
     try {
       if (editing) { const up = await api.updatePort(editing.id, data); replacePort(up); }
       else { const cp = await api.createPort(nodeId, data); state.ports.push(cp); }
-      renderDetail(); refreshGraphNode(nodeId); refreshChrome();
+      renderDetail(); syncGraph(); refreshChrome();
       closeModal();
       toast(editing ? 'Port updated' : 'Port added', 'ok');
     } catch (e) {
@@ -1671,26 +1761,25 @@ window.deletePort = async function(portId) {
   try {
     await api.deletePort(portId);
     state.ports = state.ports.filter(x => x.id !== portId);
-    renderDetail(); refreshGraphNode(p.nodeId); refreshChrome();
+    renderDetail(); syncGraph(); refreshChrome();
     toast('Port ' + p.portNumber + '/' + p.protocol + ' removed', 'ok');
   } catch (e) { toast(e.message, 'err'); }
 };
 
-/* ---- delete node (server reparents children + cascades ports) ---- */
+/* ---- delete node (cascades ports and removes containment edges) ---- */
 function confirmDeleteNode(id) {
   if (!requireEdit()) return;
   const n = state.nodes.find(x => x.id === id);
   if (!n) return;
-  const kids = state.nodes.filter(x => x.parentId === id);
+  const kids = state.nodes.filter(x => x.parentIds.includes(id));
   const portCount = state.ports.filter(p => p.nodeId === id).length;
-  const grandparent = n.parentId ? state.nodes.find(x => x.id === n.parentId) : null;
   openModal(`
     <div class="modal__head"><h3 id="modalTitle">Delete node</h3>
       <button class="btn btn--ghost btn--icon" onclick="closeModal()" aria-label="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg></button>
     </div>
     <div class="modal__body">
       <p class="confirm-text">Delete <strong>${esc(n.name)}</strong> and its <strong>${portCount}</strong> port${portCount===1?'':'s'}? This can't be undone.</p>
-      ${kids.length ? `<div class="warn-box">${kids.length} child node${kids.length===1?'':'s'} (${kids.map(k=>esc(k.name)).join(', ')}) will be ${grandparent ? `re-parented to <strong>${esc(grandparent.name)}</strong>` : 'promoted to root'}.</div>` : ''}
+      ${kids.length ? `<div class="warn-box">${kids.length} child node${kids.length===1?'':'s'} will remain, but this parent relationship will be removed.</div>` : ''}
     </div>
     <div class="modal__foot">
       <button class="btn" onclick="closeModal()">Cancel</button>
@@ -1767,6 +1856,7 @@ document.getElementById('btnReset').addEventListener('click', () => {
       const result = await api.importAll(seedData());
       state = { nodes: result.nodes || [], ports: result.ports || [], networks: result.networks || [], links: result.links || [] };
       selectedId = null;
+      focusSet = null;
       syncGraph(); renderDetail(); refreshChrome(); closeSidebar();
       localStorage.removeItem('hst-banner');
       document.getElementById('sampleBanner').style.display = '';
@@ -1864,7 +1954,7 @@ function renderLayers() {
     const used = new Set(state.nodes.map(n => n.type));
     grid.innerHTML = TYPE_ORDER.map(k => `<div class="legend__item" style="${used.has(k) ? '' : 'opacity:.4'}"><span class="legend__dot" style="background:${TYPES[k].color}"></span>${TYPES[k].label}</div>`).join('');
   }
-  const contCount = state.nodes.filter(n => n.parentId).length;
+  const contCount = state.nodes.reduce((count, n) => count + n.parentIds.length, 0);
   const etoggle = (key, label, color, dashed, count) => `<button class="etoggle ${edgeToggles[key] !== false ? 'on' : ''}" data-edge="${key}" aria-pressed="${edgeToggles[key] !== false}"><span class="etoggle__line ${dashed ? 'dashed' : ''}" style="--ec:${color}"></span><span class="etoggle__lbl">${label}</span><span class="etoggle__n">${count}</span></button>`;
   let eh = etoggle('containment', 'Containment', '#5b6675', false, contCount);
   LINK_ORDER.forEach(k => { const c = state.links.filter(l => l.type === k).length; if (c) eh += etoggle(k, LINK_TYPES[k].label, LINK_TYPES[k].color, true, c); });
@@ -2362,7 +2452,12 @@ document.getElementById('viewToggle').addEventListener('click', (e) => {
   const body = document.getElementById('tableBody');
   if (body) {
     const activate = (tr) => { const id = tr.dataset.id; if (id) select(id); };
-    body.addEventListener('click', (e) => { const tr = e.target.closest('tr[data-id]'); if (tr) activate(tr); });
+    body.addEventListener('click', (e) => {
+      const child = e.target.closest('[data-goto-node]');
+      if (child) { e.stopPropagation(); select(child.dataset.gotoNode); return; }
+      if (e.target.closest('details, a')) return;
+      const tr = e.target.closest('tr[data-id]'); if (tr) activate(tr);
+    });
     body.addEventListener('keydown', (e) => {
       const tr = e.target.closest('tr[data-id]'); if (!tr) return;
       if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(tr); }
@@ -2599,7 +2694,7 @@ async function doImportApply() {
   const payload = { nodes: p.nodes || [], ports: p.ports || [] };
   if (importWiz.source === 'ss') { if (importWiz.nodeId) payload.nodeId = importWiz.nodeId; }
   else {
-    if (importWiz.parentId) payload.parentId = importWiz.parentId;
+    if (importWiz.parentId) payload.parentIds = [importWiz.parentId];
     if (importWiz.networkId) payload.networkId = importWiz.networkId;
     if (importWiz.nodeId) payload.nodeId = importWiz.nodeId;   // fallback target for any host-less ports
   }

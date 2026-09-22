@@ -20,8 +20,8 @@ router.get('/topology', wrap((req, res) => {
   const links = store.listLinks();
 
   const edges = [];
-  for (const n of nodes) {
-    if (n.parentId) edges.push({ id: `edge-${n.parentId}-${n.id}`, from: n.parentId, to: n.id, kind: 'containment' });
+  for (const n of nodes) for (const parentId of n.parentIds) {
+    edges.push({ id: `edge-${parentId}-${n.id}`, from: parentId, to: n.id, kind: 'containment' });
   }
   for (const l of links) {
     edges.push({ id: l.id, from: l.fromNodeId, to: l.toNodeId, kind: 'link', type: l.type, label: l.label });
