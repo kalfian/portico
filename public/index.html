@@ -103,7 +103,7 @@
           </div>
         </div>
       </div>
-      <div class="graph-hint">Click a node to inspect · drag to reposition · scroll to zoom</div>
+      <div class="graph-hint" id="graphHint">Click to inspect · drag to reposition · use Fit to frame everything</div>
 
       <!-- floating canvas controls -->
       <div class="fab" role="group" aria-label="Canvas controls">
@@ -132,12 +132,19 @@
     </section>
 
     <!-- node table (alternative to the graph) -->
-    <section class="table-wrap" id="tableView" aria-label="Node table" hidden>
+    <section class="table-wrap" id="tableView" aria-label="Operator inventory" hidden>
       <div class="tbl-toolbar">
         <div class="search tbl-search">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
-          <input class="input" id="tableFilter" type="search" placeholder="Filter nodes by name, IP, tag…" aria-label="Filter nodes" autocomplete="off" />
+          <input class="input" id="tableFilter" type="search" placeholder="Filter servers, apps, IPs, ports, routes…" aria-label="Filter inventory" autocomplete="off" />
         </div>
+        <div class="seg seg--sm inventory-scope" id="inventoryScope" role="group" aria-label="Inventory scope">
+          <button type="button" data-scope="all" aria-pressed="true">All</button>
+          <button type="button" data-scope="ports" aria-pressed="false">Has ports</button>
+          <button type="button" data-scope="cloudflare" aria-pressed="false">Cloudflare</button>
+          <button type="button" data-scope="unlinked" aria-pressed="false">Needs link</button>
+        </div>
+        <span class="tbl-summary" id="tableSummary"></span>
         <span class="tbl-count" id="tableCount" aria-live="polite"></span>
       </div>
       <div class="tbl-scroll" id="tableScroll">

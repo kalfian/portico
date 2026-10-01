@@ -266,6 +266,16 @@ function validatePortFields(f) {
   }
 }
 
+function resolveCloudflareRoute(f, routeId) {
+  if (f.exposureMode === 'lan') return null;
+  if (!routeId) return null;
+  const route = db.prepare('SELECT id, hostname FROM cloudflare_routes WHERE id = ?').get(routeId);
+  if (!route) throw new ApiError(400, 'Cloudflare route not found');
+  f.domain = route.hostname;
+  f.exposure = 'public';
+  return route.id;
+}
+
 const insPort = db.prepare(`
   INSERT INTO ports (pos_x, pos_y, id, node_id, port_number, protocol, service_name, description, status,
                      domain, exposure, exposure_mode, scheme, host_port, target_node_id, cloudflare_route_id, last_seen, source, external_id, observed_at, created_at, updated_at)
@@ -276,6 +286,7 @@ const insPort = db.prepare(`
 function createPort(nodeId, body) {
   if (!getNodeRow(nodeId)) throw new ApiError(404, 'Node not found');
   const f = resolvePortFields(body, null);
+  const cloudflareRouteId = resolveCloudflareRoute(f, body.cloudflareRouteId || null);
   validatePortFields(f);
   const id = body.id || uid('p');
   const ts = now();
@@ -286,7 +297,7 @@ function createPort(nodeId, body) {
       domain: f.domain || '', exposure: f.exposure, exposure_mode: f.exposureMode, scheme: f.scheme,
       pos_x: f.posX == null ? null : Number(f.posX) || 0, pos_y: f.posY == null ? null : Number(f.posY) || 0,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-      target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId || null, last_seen: null, source: body.source || null, external_id: body.externalId || null, observed_at: body.observedAt || null, created_at: ts, updated_at: ts,
+      target_node_id: f.targetNodeId || null, cloudflare_route_id: cloudflareRouteId, last_seen: null, source: body.source || null, external_id: body.externalId || null, observed_at: body.observedAt || null, created_at: ts, updated_at: ts,
     });
   } catch (err) { throw mapDbError(err); }
   return portToApi(getPortRow(id));
@@ -303,6 +314,8 @@ function updatePort(id, body) {
   const existing = getPortRow(id);
   if (!existing) throw new ApiError(404, 'Port not found');
   const f = resolvePortFields(body, existing);
+  const requestedRouteId = body.cloudflareRouteId === undefined ? existing.cloudflare_route_id : (body.cloudflareRouteId || null);
+  const cloudflareRouteId = resolveCloudflareRoute(f, requestedRouteId);
   validatePortFields(f);
   try {
     updPort.run({
@@ -311,7 +324,7 @@ function updatePort(id, body) {
       scheme: f.scheme,
       pos_x: f.posX == null ? null : Number(f.posX) || 0, pos_y: f.posY == null ? null : Number(f.posY) || 0,
       host_port: f.hostPort === '' || f.hostPort === undefined ? null : (f.hostPort === null ? null : Number(f.hostPort)),
-      target_node_id: f.targetNodeId || null, cloudflare_route_id: body.cloudflareRouteId === undefined ? existing.cloudflare_route_id : (body.cloudflareRouteId || null), updated_at: now(),
+      target_node_id: f.targetNodeId || null, cloudflare_route_id: cloudflareRouteId, updated_at: now(),
     });
   } catch (err) { throw mapDbError(err); }
   return portToApi(getPortRow(id));
@@ -515,6 +528,39 @@ function listCloudflareRoutes() {
     notes: r.notes, source: r.source, observedAt: r.observed_at ?? null,
     createdAt: r.created_at, updatedAt: r.updated_at,
   }));
+}
+
+// Read-only operator projection. It keeps the existing node/port/route entities
+// authoritative while making their relationships easy to consume in one call.
+function listInventory() {
+  const nodes = listNodes();
+  const ports = allPorts();
+  const routes = listCloudflareRoutes();
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+  const routeMap = new Map(routes.map((route) => [route.id, route]));
+  const serverTypes = new Set(['physical', 'proxmox_host', 'docker_host', 'network_device']);
+
+  function serverFor(node) {
+    let current = node;
+    const seen = new Set();
+    while (current && !seen.has(current.id)) {
+      if (serverTypes.has(current.type)) return current;
+      seen.add(current.id);
+      current = current.parentId ? nodeMap.get(current.parentId) : null;
+    }
+    return node || null;
+  }
+
+  return ports.map((port) => {
+    const owner = nodeMap.get(port.nodeId) || null;
+    return {
+      port,
+      owner,
+      server: serverFor(owner),
+      target: port.targetNodeId ? (nodeMap.get(port.targetNodeId) || null) : null,
+      cloudflareRoute: port.cloudflareRouteId ? (routeMap.get(port.cloudflareRouteId) || null) : null,
+    };
+  });
 }
 
 function getTopology() {
@@ -884,7 +930,7 @@ module.exports = {
   // links
   listLinks, createLink, updateLink, deleteLink,
   // aggregate
-  getTopology, exportAll, importAll, isEmpty, listCloudflareRoutes,
+  getTopology, exportAll, importAll, isEmpty, listCloudflareRoutes, listInventory,
   // probe (health check)
   listProbeTargets, recordProbeResult,
   // import (parse → apply)

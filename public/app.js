@@ -83,6 +83,10 @@ function applyLockState() {
   if (typeof network !== 'undefined' && network) network.setOptions({ interaction: { dragNodes: true } });
   const saveBtn = document.getElementById('btnSaveLayout');
   if (saveBtn) saveBtn.hidden = !(layoutDirty && canEdit());
+  const hint = document.getElementById('graphHint');
+  if (hint) hint.textContent = canEdit()
+    ? 'Click to inspect · drag to reposition · use Fit to frame everything'
+    : 'Read-only · drag previews locally · sign in to save layout';
   if (typeof renderDetail === 'function') renderDetail();   // re-render edit/delete affordances
 }
 function updateAuthBadge() {
@@ -344,6 +348,7 @@ let freeRange = { from: 8000, to: 9000, proto: 'tcp' };
 /* view + node-table UI prefs (persisted like the other localStorage prefs) */
 let currentView = (localStorage.getItem('hst-view') === 'table') ? 'table' : 'graph';
 let tableQ = '';
+let tableScope = 'all';
 // Table hierarchy is independent from port ownership: collapsing a node only
 // hides descendant nodes, never ports owned by another node.
 const tableCollapsed = new Set();
@@ -403,6 +408,7 @@ async function saveLayout() {
 
 /* ================= GRAPH ================= */
 let network, nodesDS, edgesDS;
+let graphAutoFit = true;
 let colorBy = 'type';                                   // 'type' | 'network'
 // The default canvas shows the readable containment path. Network and
 // virtualization edges remain available in Layers, but otherwise duplicate or
@@ -495,6 +501,7 @@ function toggleNodeSection(id, ports) {
   const collapsed = ports ? tablePortsCollapsed : tableCollapsed;
   if (collapsed.has(id)) collapsed.delete(id); else collapsed.add(id);
   syncGraph(); renderTable(); renderDetail();
+  if (currentView === 'graph' && graphAutoFit) setTimeout(() => fitGraph({ animation: !REDUCE }), 20);
 }
 function portGraphId(p) { return 'port:' + p.id; }
 function portVis(p) {
@@ -506,11 +513,14 @@ function portVis(p) {
   // every port inherited the same offset and rendered as one unreadable stack.
   const owned = portsFor(p.nodeId).slice().sort((a, b) => (a.portNumber || 0) - (b.portNumber || 0));
   const index = Math.max(0, owned.findIndex(x => x.id === p.id));
+  const columns = Math.min(4, Math.max(owned.length, 1));
+  const column = index % columns;
+  const row = Math.floor(index / columns);
   const gap = 145;
-  const start = -((Math.max(owned.length, 1) - 1) * gap) / 2;
+  const start = -((Math.min(owned.length, columns) - 1) * gap) / 2;
   return {
     id: portGraphId(p), label: `${p.serviceName || 'service'}\n${p.portNumber}/${p.protocol} · ${exposure.label} · ${p.status}\n${exposureModeLabel(p)}${domain}${target ? `\n→ ${target.name}` : ''}`,
-    shape: 'box', margin: 7, x: p.posX ?? ((owner?.posX || 0) + start + index * gap), y: p.posY ?? ((owner?.posY || 0) + 135),
+    shape: 'box', margin: 7, x: p.posX ?? ((owner?.posX || 0) + start + column * gap), y: p.posY ?? ((owner?.posY || 0) + 135 + row * 92),
     color: { background: '#192532', border: exposure.label === 'public' ? '#f87171' : '#3b82f6', highlight: { background: '#22364a', border: '#67e8f9' } },
     font: { color: '#dbeafe', size: 10, face: 'SFMono-Regular, monospace', multi: 'md' },
     borderWidth: 1, shadow: { enabled: true, color: 'rgba(0,0,0,.3)', size: 6, x: 0, y: 2 },
@@ -615,6 +625,7 @@ function buildGraph() {
   setupSmoothZoom(container);
   network.on('afterDrawing', (ctx) => { resolveGraphOverlaps(); drawFlow(ctx); });
   network.on('dragging', (params) => resolveGraphOverlaps(params.nodes));
+  network.on('dragStart', (params) => { if (!params.nodes.length) graphAutoFit = false; });
   network.on('click', (params) => {
     if (params.nodes.length) select(params.nodes[0]);
     else { selectedId = null; focusSet = null; network.unselectAll(); syncGraph(); closeSidebar(); renderDetail(); markTableSelection(); }
@@ -644,7 +655,14 @@ function buildGraph() {
     network.on('hoverNode', () => { graphEl.style.cursor = 'pointer'; });
     network.on('blurNode', () => { graphEl.style.cursor = 'default'; });
   }
-  setTimeout(() => { network.fit({ animation: false }); startFlow(); }, 60);
+  setTimeout(() => { fitGraph({ animation: false }); startFlow(); }, 60);
+  if (window.ResizeObserver) {
+    let resizeTimer = 0;
+    new ResizeObserver(() => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => { if (graphAutoFit && currentView === 'graph') fitGraph({ animation: false }); }, 80);
+    }).observe(container);
+  }
   document.addEventListener('visibilitychange', () => {
     tabHidden = document.hidden;
     if (tabHidden) { cancelAnimationFrame(flowRAF); flowRAF = 0; } else startFlow();
@@ -725,6 +743,7 @@ let zoomTarget = null, zoomAnchorDOM = null, zoomRAF = 0;
 function setupSmoothZoom(container) {
   container.addEventListener('wheel', (e) => {
     e.preventDefault();
+    graphAutoFit = false;
     const cur = network.getScale();
     const base = (zoomTarget == null) ? cur : zoomTarget;
     let next = base * Math.exp(-e.deltaY * ZOOM_SENSITIVITY);
@@ -751,6 +770,7 @@ function zoomLoop() {
   zoomRAF = requestAnimationFrame(zoomLoop);
 }
 function smoothZoomBy(factor) {
+  graphAutoFit = false;
   const rect = document.getElementById('graph').getBoundingClientRect();
   const anchor = { x: rect.width / 2, y: rect.height / 2 };
   const base = (zoomTarget == null) ? network.getScale() : zoomTarget;
@@ -758,6 +778,52 @@ function smoothZoomBy(factor) {
   zoomAnchorDOM = anchor;
   if (REDUCE) { applyZoom(zoomTarget, anchor); zoomTarget = null; return; }
   if (!zoomRAF) zoomRAF = requestAnimationFrame(zoomLoop);
+}
+
+function graphFitCamera(bounds, viewport, insets = {}) {
+  if (!bounds || !viewport || !Number.isFinite(viewport.width) || !Number.isFinite(viewport.height)) return null;
+  const pad = { top: 24, right: 32, bottom: 24, left: 32, ...insets };
+  const safeWidth = Math.max(1, viewport.width - pad.left - pad.right);
+  const safeHeight = Math.max(1, viewport.height - pad.top - pad.bottom);
+  const boundsWidth = Math.max(1, bounds.right - bounds.left);
+  const boundsHeight = Math.max(1, bounds.bottom - bounds.top);
+  const scale = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.min(safeWidth / boundsWidth, safeHeight / boundsHeight) * 0.9));
+  const safeCenter = { x: pad.left + safeWidth / 2, y: pad.top + safeHeight / 2 };
+  const viewportCenter = { x: viewport.width / 2, y: viewport.height / 2 };
+  return {
+    scale,
+    position: {
+      x: (bounds.left + bounds.right) / 2 + (viewportCenter.x - safeCenter.x) / scale,
+      y: (bounds.top + bounds.bottom) / 2 + (viewportCenter.y - safeCenter.y) / scale,
+    },
+  };
+}
+function graphViewportInsets(container) {
+  const root = container.getBoundingClientRect();
+  const visible = (el) => el && getComputedStyle(el).display !== 'none' && el.getBoundingClientRect().width > 0;
+  const banner = document.getElementById('sampleBanner');
+  const hint = document.getElementById('graphHint');
+  const top = visible(banner) ? Math.max(24, banner.getBoundingClientRect().bottom - root.top + 16) : 24;
+  const bottom = visible(hint) ? Math.max(24, root.bottom - hint.getBoundingClientRect().top + 16) : 24;
+  return { top, right: 32, bottom, left: 32 };
+}
+function fitGraph(opts = {}) {
+  if (!network || !nodesDS || !nodesDS.getIds().length) return false;
+  const container = document.getElementById('graph');
+  const rect = container.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return false;
+  const boxes = nodesDS.getIds().map(id => network.getBoundingBox(id)).filter(Boolean);
+  const finite = boxes.filter(box => [box.left, box.right, box.top, box.bottom].every(Number.isFinite));
+  if (!finite.length) return false;
+  const bounds = {
+    left: Math.min(...finite.map(box => box.left)), right: Math.max(...finite.map(box => box.right)),
+    top: Math.min(...finite.map(box => box.top)), bottom: Math.max(...finite.map(box => box.bottom)),
+  };
+  const camera = graphFitCamera(bounds, rect, graphViewportInsets(container));
+  if (!camera) return false;
+  graphAutoFit = opts.remember !== false;
+  network.moveTo({ ...camera, animation: opts.animation || false });
+  return true;
 }
 
 function syncGraph() {
@@ -787,7 +853,7 @@ function autoArrange() {
     network.setOptions({ layout: { hierarchical: { enabled: false } } });
     syncGraph();
     markLayoutDirty();
-    setTimeout(() => network.fit({ animation: { duration: 350 } }), 30);
+    setTimeout(() => fitGraph({ animation: { duration: 350 }, remember: true }), 30);
     toast('Layout preview ready — press Save layout to persist it', 'ok');
   });
 }
@@ -810,6 +876,7 @@ function select(id) {
   syncGraph();
   openSidebar();
   if (network && !REDUCE && currentView !== 'table') {
+    graphAutoFit = false;
     network.focus(id, { scale: network.getScale(), animation: { duration: 420, easingFunction: 'easeInOutCubic' } });
   }
   renderDetail();
@@ -879,6 +946,26 @@ function nodePortStats(id) {
   }
   return { inUse, total, expRank };
 }
+function cloudflareRouteById(id) { return id ? (state.cloudflareRoutes || []).find(route => route.id === id) : null; }
+function isCloudflarePort(p) { return (p.exposureMode || (p.domain || p.cloudflareRouteId ? 'cloudflare' : 'lan')) === 'cloudflare'; }
+function ownedPorts(n) { return state.ports.filter(p => p.nodeId === n.id); }
+function nodeMatchesInventory(n, q) {
+  const nw = n.networkId ? nwById(n.networkId) : null;
+  const ports = ownedPorts(n);
+  if (tableScope === 'ports' && !ports.length) return false;
+  if (tableScope === 'cloudflare' && !ports.some(isCloudflarePort)) return false;
+  if (tableScope === 'unlinked' && !ports.some(p => isCloudflarePort(p) && !p.cloudflareRouteId)) return false;
+  if (!q) return true;
+  const related = ports.flatMap(p => {
+    const route = cloudflareRouteById(p.cloudflareRouteId);
+    const target = p.targetNodeId ? nodeById(p.targetNodeId) : null;
+    return [p.serviceName, p.portNumber, p.protocol, p.description, p.domain, p.hostPort,
+      target && target.name, target && target.ipAddress,
+      route && route.hostname, route && route.target, route && route.targetHost, route && route.targetPort];
+  });
+  return [n.name, n.ipAddress, n.macAddress, n.os, n.role, (TYPES[n.type] || {}).label,
+    nw ? nw.name : '', (n.tags || []).join(' '), ...related].join(' ').toLowerCase().includes(q);
+}
 function setView(v, opts = {}) {
   v = v === 'table' ? 'table' : 'graph';
   currentView = v;
@@ -891,7 +978,10 @@ function setView(v, opts = {}) {
   if (tableView) tableView.hidden = !isTable;
   document.body.classList.toggle('view-table', isTable);
   if (isTable) renderTable();
-  else if (network) { reflowGraph(); }   // graph was 0-sized while hidden — re-measure + redraw
+  else if (network) {
+    reflowGraph();
+    if (graphAutoFit) setTimeout(() => fitGraph({ animation: false }), 30);
+  }   // graph was 0-sized while hidden — re-measure + redraw
 }
 /* comparator for the active sort column */
 function nodeSortValue(n, key) {
@@ -921,14 +1011,7 @@ function hasCollapsedTableAncestor(n) {
 }
 function filteredSortedNodes() {
   const q = tableQ.trim().toLowerCase();
-  let rows = state.nodes.filter(n => !hasCollapsedTableAncestor(n));
-  if (q) {
-    rows = rows.filter(n => {
-      const nw = n.networkId ? nwById(n.networkId) : null;
-      const hay = [n.name, n.ipAddress, n.macAddress, n.os, n.role, (TYPES[n.type] || {}).label, nw ? nw.name : '', (n.tags || []).join(' ')].join(' ').toLowerCase();
-      return hay.includes(q);
-    });
-  }
+  let rows = state.nodes.filter(n => !hasCollapsedTableAncestor(n) && nodeMatchesInventory(n, q));
   const { key, dir } = tableSort;
   const sign = dir === 'desc' ? -1 : 1;
   const hierarchy = [];
@@ -985,11 +1068,19 @@ function renderTableRows() {
   const rows = filteredSortedNodes();
   const total = state.nodes.length;
   body.innerHTML = rows.map(n => {
-    const owned = state.ports.filter(p => p.nodeId === n.id);
+    const owned = ownedPorts(n);
     const portsCollapsed = tablePortsCollapsed.has(n.id);
-    const details = owned.map(p => `<div class="table-port-detail"><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.status)} · ${esc(exposureModeLabel(p))} · ${esc(p.exposure)}${p.domain ? ` · ${esc(p.domain)}` : ''} ${portOpenLink(n, p)}</div>`).join('');
+    const details = owned.map(p => {
+      const route = cloudflareRouteById(p.cloudflareRouteId);
+      const target = p.targetNodeId ? nodeById(p.targetNodeId) : null;
+      const routeTarget = route && (route.target || [route.targetHost, route.targetPort].filter(v => v != null && v !== '').join(':'));
+      const cf = route
+        ? `<span class="inventory-route">CF <b>${esc(route.hostname)}</b>${routeTarget ? ` → ${esc(routeTarget)}` : ''}</span>`
+        : (isCloudflarePort(p) ? `<span class="inventory-route inventory-route--warn">CF ${esc(p.domain || 'hostname missing')} · route not linked</span>` : '');
+      return `<div class="table-port-detail"><span><b>${esc(p.serviceName || 'service')}</b> · ${p.portNumber}/${p.protocol} · ${esc(p.status)}</span>${target ? `<span>forwards to <button class="link-node" data-goto="${esc(target.id)}">${esc(target.name)}</button></span>` : ''}${cf}${portOpenLink(n, p)}</div>`;
+    }).join('');
     const portSummary = owned.length ? `<button type="button" class="port-toggle" data-port-collapse="${esc(n.id)}" aria-expanded="${String(!portsCollapsed)}">${portsCollapsed ? '▸' : '▾'} ${owned.length} owned port${owned.length === 1 ? '' : 's'}</button>` : '<span class="muted">No ports recorded</span>';
-    return `<tr data-id="${esc(n.id)}" class="host-row">${tableRowHtml(n).replace(/^<tr[^>]*>|<\/tr>$/g, '')}</tr><tr class="port-details${portsCollapsed ? ' is-collapsed' : ''}" data-owner="${esc(n.id)}"><td colspan="7">${portSummary}${portsCollapsed ? '' : (details || '<span class="muted">No ports recorded</span>')}</td></tr>`;
+    return `<tr data-id="${esc(n.id)}" class="host-row">${tableRowHtml(n).replace(/^<tr[^>]*>|<\/tr>$/g, '')}</tr><tr class="port-details${portsCollapsed ? ' is-collapsed' : ''}" data-owner="${esc(n.id)}"><td colspan="7">${portSummary}${portsCollapsed ? '' : details}</td></tr>`;
   }).join('');
   body.querySelectorAll('.host-row').forEach(row => row.addEventListener('click', (e) => { if (!e.target.closest('button')) row.classList.toggle('is-expanded'); }));
   const tableEl = document.querySelector('#tableView table.ntable');
@@ -1009,7 +1100,15 @@ function renderTableRows() {
       emptyEl.hidden = true;
     }
   }
-  if (countEl) countEl.textContent = (rows.length === total) ? `${total} node${total !== 1 ? 's' : ''}` : `${rows.length} of ${total}`;
+  if (countEl) countEl.textContent = (rows.length === total && tableScope === 'all' && !tableQ.trim()) ? `${total} node${total !== 1 ? 's' : ''}` : `${rows.length} of ${total}`;
+  const summaryEl = document.getElementById('tableSummary');
+  if (summaryEl) {
+    const servers = state.nodes.filter(n => ['physical', 'proxmox_host', 'docker_host', 'network_device'].includes(n.type)).length;
+    const owners = new Set(state.ports.map(p => p.nodeId)).size;
+    const ips = state.nodes.filter(n => (n.ipAddress || '').trim()).length;
+    const routed = state.ports.filter(p => p.cloudflareRouteId).length;
+    summaryEl.textContent = `${servers} servers · ${owners} app owners · ${ips} IPs · ${state.ports.length} ports · ${routed} CF linked`;
+  }
 }
 function updateSortIndicators() {
   document.querySelectorAll('#tableView thead th[data-sort]').forEach(th => {
@@ -1077,11 +1176,14 @@ function renderPortDetail(el, p) {
   const owner = nodeById(p.nodeId);
   const target = nodeById(p.targetNodeId);
   const parent = owner && nodeById(owner.parentId);
+  const route = cloudflareRouteById(p.cloudflareRouteId);
+  const routeTarget = route && (route.target || [route.targetHost, route.targetPort].filter(v => v != null && v !== '').join(':'));
   el.innerHTML = `<div class="node-head"><h2>${esc(p.serviceName || 'service')}</h2>
     <p>${p.portNumber}/${esc(p.protocol)} · ${esc(p.status)} · ${esc(p.exposure)} · ${esc(exposureModeLabel(p))}</p>
     <p>${esc(p.description || '')}</p>${owner ? portOpenLink(owner, p) : ''}
     <dl class="kv">${[['Owner', owner], ['Parent', parent], ['Target', target]].map(([label, n]) => n ? `<dt>${label}</dt><dd><button class="copy" data-goto="${esc(n.id)}">${esc(n.name)}</button></dd>` : '').join('')}
-    ${p.hostPort != null ? `<dt>Host port</dt><dd>${p.hostPort}</dd>` : ''}</dl></div>`;
+    ${p.hostPort != null ? `<dt>Host port</dt><dd>${p.hostPort}</dd>` : ''}
+    ${route ? `<dt>Cloudflare route</dt><dd>${esc(route.hostname)}${routeTarget ? ` → ${esc(routeTarget)}` : ''}</dd>` : (isCloudflarePort(p) ? `<dt>Cloudflare route</dt><dd class="route-warning">Not explicitly linked</dd>` : '')}</dl></div>`;
   el.querySelectorAll('[data-goto]').forEach(b => b.addEventListener('click', () => gotoNode(b.dataset.goto)));
 }
 
@@ -1718,6 +1820,8 @@ function openPortModal(nodeId = selectedId, portId = null) {
   const p = editing || { portNumber:'', protocol:'tcp', serviceName:'', description:'', domain:'', exposure:'internal', scheme:'http', hostPort:null, targetNodeId:null, status:'in_use' };
   const fwdOpts = ['<option value="">— none</option>']
     .concat(state.nodes.filter(x => x.id !== nodeId).map(x => `<option value="${x.id}" ${p.targetNodeId === x.id ? 'selected' : ''}>${esc(x.name)} · ${TYPES[x.type].label}</option>`)).join('');
+  const routeOpts = ['<option value="">— manual hostname / no linked route</option>']
+    .concat(state.cloudflareRoutes.map(route => `<option value="${esc(route.id)}" ${p.cloudflareRouteId === route.id ? 'selected' : ''}>${esc(route.hostname)}${route.target ? ` → ${esc(route.target)}` : ''}</option>`)).join('');
 
   openModal(`
     <div class="modal__head">
@@ -1757,6 +1861,11 @@ function openPortModal(nodeId = selectedId, portId = null) {
           <label for="f-domain">Hostname / domain</label>
           <input class="input" id="f-domain" value="${esc(p.domain || '')}" placeholder="service.example.com" autocomplete="off" inputmode="url">
           <div class="hint">Hostname for Cloudflare tunnel/domain access. LAN/IP-only uses the node IP address.</div>
+        </div>
+        <div class="form-field full">
+          <label for="f-cfroute">Cloudflare route</label>
+          <select class="input" id="f-cfroute">${routeOpts}</select>
+          <div class="hint">Links this app port to an explicit route record. Selecting one fills its hostname.</div>
         </div>
         <div class="form-field">
           <label for="f-exposure">Exposure</label>
@@ -1812,7 +1921,9 @@ function openPortModal(nodeId = selectedId, portId = null) {
     const clash = state.ports.some(x => x.nodeId === nodeId && x.portNumber === num && x.protocol === proto && x.id !== (editing?.id));
     if (clash) { document.getElementById('dupErr').style.display = 'block'; return; }
     const exposureMode = document.getElementById('f-mode').value;
-    const domain = exposureMode === 'lan' ? '' : document.getElementById('f-domain').value.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, '');
+    const cloudflareRouteId = exposureMode === 'lan' ? null : (document.getElementById('f-cfroute').value || null);
+    const linkedRoute = cloudflareRouteById(cloudflareRouteId);
+    const domain = exposureMode === 'lan' ? '' : (linkedRoute ? linkedRoute.hostname : document.getElementById('f-domain').value.trim().replace(/^https?:\/\//i, '').replace(/\/.*$/, ''));
     let exposure = document.getElementById('f-exposure').value;
     if (domain && exposure !== 'public') exposure = 'public';
     const hostPortRaw = document.getElementById('f-hostport').value.trim();
@@ -1827,6 +1938,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
       scheme: document.getElementById('f-scheme').value,
       hostPort,
       targetNodeId: document.getElementById('f-target').value || null,
+      cloudflareRouteId,
       status: document.getElementById('f-pstatus').value,
     };
     const saveBtn = document.getElementById('portSave');
@@ -1843,6 +1955,16 @@ function openPortModal(nodeId = selectedId, portId = null) {
       toast(e.message, 'err');
     }
   };
+  document.getElementById('f-cfroute').addEventListener('change', (e) => {
+    const route = cloudflareRouteById(e.target.value);
+    if (!route) return;
+    document.getElementById('f-mode').value = 'cloudflare';
+    document.getElementById('f-domain').value = route.hostname;
+    document.getElementById('f-exposure').value = route.exposure === 'internal' ? 'internal' : 'public';
+  });
+  document.getElementById('f-mode').addEventListener('change', (e) => {
+    if (e.target.value === 'lan') document.getElementById('f-cfroute').value = '';
+  });
   document.getElementById('portSave').addEventListener('click', submit);
   document.getElementById('portForm').addEventListener('submit', (e)=>{ e.preventDefault(); submit(); });
   const domEl = document.getElementById('f-domain');
@@ -1850,6 +1972,7 @@ function openPortModal(nodeId = selectedId, portId = null) {
     if (document.getElementById('f-mode').value === 'lan') { domEl.value = ''; document.getElementById('f-exposure').value = 'lan'; }
   });
   domEl.addEventListener('input', () => {
+    document.getElementById('f-cfroute').value = '';
     if (domEl.value.trim()) { document.getElementById('f-mode').value = 'cloudflare'; document.getElementById('f-exposure').value = 'public'; document.getElementById('f-scheme').value = 'https'; }
   });
 }
@@ -1928,11 +2051,11 @@ document.getElementById('fileImport').addEventListener('change', (e) => {
       const d = JSON.parse(reader.result);
       if (!d || !Array.isArray(d.nodes)) throw new Error('missing nodes array');
       const result = await api.importAll(d);
-      state = { nodes: result.nodes || [], ports: result.ports || [], networks: result.networks || [], links: result.links || [] };
+      state = { nodes: result.nodes || [], ports: result.ports || [], networks: result.networks || [], links: result.links || [], cloudflareRoutes: result.cloudflareRoutes || [] };
       selectedId = null;
       syncGraph(); renderDetail(); refreshChrome(); closeSidebar();
       menuOverlay.classList.remove('open');
-      setTimeout(() => network.fit({ animation: !REDUCE }), 40);
+      setTimeout(() => fitGraph({ animation: !REDUCE, remember: true }), 40);
       toast('Imported ' + state.nodes.length + ' nodes', 'ok');
     } catch (err) { toast('Import failed: ' + (err.message || 'invalid JSON'), 'err'); }
   };
@@ -1955,12 +2078,12 @@ document.getElementById('btnReset').addEventListener('click', () => {
     btn.disabled = true;
     try {
       const result = await api.importAll(seedData());
-      state = { nodes: result.nodes || [], ports: result.ports || [], networks: result.networks || [], links: result.links || [] };
+      state = { nodes: result.nodes || [], ports: result.ports || [], networks: result.networks || [], links: result.links || [], cloudflareRoutes: result.cloudflareRoutes || [] };
       selectedId = null;
       syncGraph(); renderDetail(); refreshChrome(); closeSidebar();
       localStorage.removeItem('hst-banner');
       document.getElementById('sampleBanner').style.display = '';
-      setTimeout(() => network.fit({ animation: true }), 40);
+      setTimeout(() => fitGraph({ animation: true, remember: true }), 40);
       closeModal(); toast('Reset to sample data', 'ok');
     } catch (e) { btn.disabled = false; toast(e.message, 'err'); }
   });
@@ -2429,7 +2552,14 @@ function runSearch(q) {
   q = q.trim().toLowerCase();
   if (!q) return { nodes: [], ports: [] };
   const nodes = state.nodes.filter(n => [n.name, n.ipAddress, n.macAddress, n.os, (n.tags || []).join(' ')].join(' ').toLowerCase().includes(q)).slice(0, 6);
-  const ports = state.ports.filter(p => [String(p.portNumber), p.serviceName, p.domain].join(' ').toLowerCase().includes(q)).slice(0, 8);
+  const ports = state.ports.filter(p => {
+    const route = cloudflareRouteById(p.cloudflareRouteId);
+    const target = p.targetNodeId ? nodeById(p.targetNodeId) : null;
+    return [String(p.portNumber), p.serviceName, p.description, p.domain, p.hostPort,
+      target && target.name, target && target.ipAddress,
+      route && route.hostname, route && route.target, route && route.targetHost, route && route.targetPort]
+      .join(' ').toLowerCase().includes(q);
+  }).slice(0, 8);
   return { nodes, ports };
 }
 function renderCmd(q) {
@@ -2525,7 +2655,7 @@ layersEl.addEventListener('click', (e) => {
   if (e.target.closest('#btnNetworks')) { openNetworksModal(); return; }
   if (e.target.closest('#btnLinks')) { openLinksModal(); return; }
 });
-if (window.matchMedia && window.matchMedia('(max-width: 640px)').matches) {
+if (window.matchMedia && window.matchMedia('(max-width: 640px), (max-height: 650px)').matches) {
   layersEl.classList.add('collapsed');
   document.getElementById('layersToggle').setAttribute('aria-expanded', 'false');
 }
@@ -2541,6 +2671,14 @@ document.getElementById('viewToggle').addEventListener('click', (e) => {
     filter.value = tableQ;
     filter.addEventListener('input', (e) => { tableQ = e.target.value; renderTableRows(); });
   }
+  const scope = document.getElementById('inventoryScope');
+  if (scope) scope.addEventListener('click', (e) => {
+    const button = e.target.closest('[data-scope]');
+    if (!button) return;
+    tableScope = button.dataset.scope;
+    scope.querySelectorAll('[data-scope]').forEach(item => item.setAttribute('aria-pressed', String(item === button)));
+    renderTableRows();
+  });
   document.querySelectorAll('#tableView thead th[data-sort] .th-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const key = btn.closest('th').dataset.sort;
@@ -2554,6 +2692,8 @@ document.getElementById('viewToggle').addEventListener('click', (e) => {
   if (body) {
     const activate = (tr) => { const id = tr.dataset.id; if (id) select(id); };
     body.addEventListener('click', (e) => {
+      const goto = e.target.closest('[data-goto]');
+      if (goto) { e.stopPropagation(); gotoNode(goto.dataset.goto); return; }
       const portToggle = e.target.closest('[data-port-collapse]');
       if (portToggle) { e.stopPropagation(); toggleNodeSection(portToggle.dataset.portCollapse, true); return; }
       const toggle = e.target.closest('[data-collapse]');
@@ -2573,7 +2713,7 @@ document.getElementById('btnImportSource').addEventListener('click', openImportM
 document.getElementById('btnAddNode').addEventListener('click', () => openNodeModal());
 document.getElementById('btnArrange').addEventListener('click', autoArrange);
 document.getElementById('btnSaveLayout').addEventListener('click', saveLayout);
-document.getElementById('btnFit').addEventListener('click', () => network.fit({ padding: 80, animation: REDUCE ? false : { duration: 420, easingFunction: 'easeInOutCubic' } }));
+document.getElementById('btnFit').addEventListener('click', () => fitGraph({ remember: true, animation: REDUCE ? false : { duration: 420, easingFunction: 'easeInOutCubic' } }));
 document.getElementById('btnZoomIn').addEventListener('click', () => smoothZoomBy(1.35));
 document.getElementById('btnZoomOut').addEventListener('click', () => smoothZoomBy(1 / 1.35));
 document.getElementById('panelCollapse').addEventListener('click', () => closeSidebar());
@@ -2584,7 +2724,10 @@ document.getElementById('panelReopen').addEventListener('click', () => {
 });
 const banner = document.getElementById('sampleBanner');
 if (localStorage.getItem('hst-banner') === 'dismissed') banner.style.display = 'none';
-document.getElementById('dismissBanner').addEventListener('click', () => { banner.style.display = 'none'; localStorage.setItem('hst-banner', 'dismissed'); });
+document.getElementById('dismissBanner').addEventListener('click', () => {
+  banner.style.display = 'none'; localStorage.setItem('hst-banner', 'dismissed');
+  if (graphAutoFit) setTimeout(() => fitGraph({ animation: !REDUCE }), 20);
+});
 
 /* expose handlers used in inline onclick */
 window.openNodeModal = openNodeModal;
@@ -2808,7 +2951,7 @@ async function doImportApply() {
     await reloadState();
     syncGraph(); refreshChrome(); renderDetail(); updateReopen();
     closeModal();
-    setTimeout(() => { if (network) network.fit({ animation: !REDUCE }); }, 40);
+    setTimeout(() => { if (network) fitGraph({ animation: !REDUCE, remember: true }); }, 40);
     const cn = r.created.nodes, cp = r.created.ports, sn = r.skipped.nodes, sp = r.skipped.ports;
     const skip = (sn || sp) ? ` · skipped ${sn} node${sn !== 1 ? 's' : ''}, ${sp} port${sp !== 1 ? 's' : ''}` : '';
     toast(`Created ${cn} node${cn !== 1 ? 's' : ''}, ${cp} port${cp !== 1 ? 's' : ''}${skip}`, 'ok');

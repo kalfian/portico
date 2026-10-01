@@ -96,6 +96,24 @@ test('fresh database API: ownership, statuses, exposure, cycles, auth and round 
     assert.equal(guest.source, 'proxmox');
     assert.equal(guest.parentId, root.id);
     assert.equal((await request(`/nodes/${guest.id}/ports`))[0].source, 'proxmox-description');
+    const routeBundle = await request('/export');
+    routeBundle.cloudflareRoutes.push({
+      id: 'cf-test', hostname: 'inventory.example.com', target: 'http://10.0.0.10:8100',
+      targetHost: '10.0.0.10', targetPort: 8100, exposure: 'public', source: 'manual',
+    });
+    await request('/import', 'POST', routeBundle);
+    const routedPort = routeBundle.ports.find(p => p.nodeId === root.id);
+    const linked = await request(`/ports/${routedPort.id}`, 'PUT', {
+      exposureMode: 'cloudflare', cloudflareRouteId: 'cf-test', domain: 'wrong.example.com',
+    });
+    assert.equal(linked.domain, 'inventory.example.com');
+    assert.equal(linked.cloudflareRouteId, 'cf-test');
+    const inventory = await request('/inventory', 'GET', undefined, 200, false);
+    const item = inventory.find(entry => entry.port.id === routedPort.id);
+    assert.equal(item.owner.id, root.id);
+    assert.equal(item.server.id, root.id);
+    assert.equal(item.cloudflareRoute.hostname, 'inventory.example.com');
+    assert.equal(item.cloudflareRoute.targetPort, 8100);
     const before = await request('/export');
     const cyclic = structuredClone(before);
     cyclic.nodes.find(n => n.id === root.id).parentId = a.id;

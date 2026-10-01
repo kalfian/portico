@@ -117,12 +117,25 @@ const spec = {
           id: { type: 'string' },
           fromNodeId: { type: 'string' },
           toNodeId: { type: 'string' },
-          type: { type: 'string', enum: ['proxy', 'mount', 'dns', 'custom'] },
+          type: { type: 'string', enum: ['network', 'virtualization', 'proxy', 'mount', 'dns', 'custom'] },
           label: { type: 'string' },
           createdAt: { type: 'string' },
           updatedAt: { type: 'string' },
         },
         required: ['fromNodeId', 'toNodeId', 'type'],
+      },
+      CloudflareRoute: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          hostname: { type: 'string' },
+          target: { type: 'string' },
+          targetHost: { type: 'string' },
+          targetPort: { type: 'integer', nullable: true },
+          exposure: { type: 'string', enum: ['internal', 'public'] },
+          notes: { type: 'string' },
+          source: { type: 'string' },
+        },
       },
       TokenMeta: {
         type: 'object',
@@ -144,6 +157,18 @@ const spec = {
           ports: { type: 'array', items: { $ref: '#/components/schemas/Port' } },
           networks: { type: 'array', items: { $ref: '#/components/schemas/Network' } },
           links: { type: 'array', items: { $ref: '#/components/schemas/Link' } },
+          cloudflareRoutes: { type: 'array', items: { $ref: '#/components/schemas/CloudflareRoute' } },
+        },
+      },
+      InventoryItem: {
+        type: 'object',
+        description: 'Read-only server → application/owner → port → Cloudflare route projection.',
+        properties: {
+          port: { $ref: '#/components/schemas/Port' },
+          owner: { allOf: [{ $ref: '#/components/schemas/Node' }], nullable: true },
+          server: { allOf: [{ $ref: '#/components/schemas/Node' }], nullable: true },
+          target: { allOf: [{ $ref: '#/components/schemas/Node' }], nullable: true },
+          cloudflareRoute: { allOf: [{ $ref: '#/components/schemas/CloudflareRoute' }], nullable: true },
         },
       },
       ProbeSummary: {
@@ -249,6 +274,7 @@ const spec = {
     },
   },
   paths: {
+    '/api/inventory': { get: { tags: ['data'], summary: 'Cross-linked server, app owner, port, target and Cloudflare route inventory', responses: { 200: { description: 'OK', content: { 'application/json': { schema: { type: 'array', items: { $ref: '#/components/schemas/InventoryItem' } } } } } } } },
     '/api/auth/status': { get: { tags: ['auth'], summary: 'Auth state', responses: { 200: { description: 'OK' } } } },
     '/api/auth/setup': { post: { tags: ['auth'], summary: 'First-run: create password', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { password: { type: 'string' } }, required: ['password'] } } } }, responses: { 201: { description: 'Created' }, 409: errorResponse } } },
     '/api/auth/login': { post: { tags: ['auth'], summary: 'Login (session)', requestBody: { content: { 'application/json': { schema: { type: 'object', properties: { password: { type: 'string' } }, required: ['password'] } } } }, responses: { 200: { description: 'OK' }, 401: errorResponse } } },

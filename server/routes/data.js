@@ -41,6 +41,7 @@ router.get('/topology', wrap((req, res) => {
 // Full export — same shape as the prototype's JSON export (camelCase).
 router.get('/export', wrap((req, res) => res.json(store.exportAll())));
 router.get('/cloudflare-routes', wrap((req, res) => res.json(store.listCloudflareRoutes())));
+router.get('/inventory', wrap((req, res) => res.json(store.listInventory())));
 
 // Replace-all import (transactional). Auth required.
 router.post('/import', requireWrite, wrap((req, res) => res.json(store.importAll(req.body || {}))));
