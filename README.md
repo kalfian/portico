@@ -57,7 +57,13 @@ npm start          # or: npm run dev  (auto-restart on change)
 ```
 
 On first boot the DB is created at `data/topology.db` (WAL mode) and **seeded with a
-sample topology** so you have something to look at immediately. Delete `data/` to reset.
+fictional demo topology** so you have something to explore immediately. The demo covers every
+supported node type, parent/child and typed graph edges, TEST-NET VLANs, varied port states and
+exposure, forwarding targets, and an explicit Cloudflare route association under `.example`.
+It is illustrative only: it is not discovered, reconciled, live, or externally verified, and
+seeding never replaces a nonempty database. Reset only a confirmed disposable local instance.
+Existing `data/` directories and Docker volumes persist across restarts and may contain real data;
+preserve them unless you deliberately intend to discard that instance.
 
 ---
 
@@ -98,7 +104,7 @@ curl http://localhost:3000/api/topology
 read -rsp 'Portico API token: ' PORTICO_TOKEN && printf '\n'
 curl -H "Authorization: Bearer $PORTICO_TOKEN" -H 'Content-Type: application/json' \
   -X POST http://localhost:3000/api/nodes \
-  -d '{"name":"new-vm","type":"vm","ipAddress":"10.20.30.40","parentId":"n-dialga"}'
+  -d '{"name":"new-demo-vm","type":"vm","ipAddress":"198.51.100.40","parentId":"n-demo-proxmox"}'
 unset PORTICO_TOKEN
 ```
 
@@ -181,12 +187,12 @@ without an authenticated write credential.
 4. Treat deletion confirmation as consequential: node deletion cascades owned ports/links and
    reparents children; network deletion clears referencing `networkId` values.
 
-Portico records are not automatically live infrastructure facts. A fresh database contains a
-sample topology. `source: "manual"` means operator-maintained data, while import source fields
-describe where a record came from; neither proves current reachability. `status` may be manual,
-whereas `lastSeen` is written by Portico's explicit health probe and is only a point-in-time
-observation. Cloudflare rows (including records described as verified) are explicit metadata in
-Portico; this MCP server neither re-verifies them against Cloudflare nor changes Cloudflare.
+Portico records are not automatically live infrastructure facts. A fresh database contains the
+fictional demo topology described above. `source: "demo"` marks those examples; `source: "manual"`
+means operator-maintained data, while import source fields describe where a record came from.
+None proves current reachability. `status` may be manual, whereas `lastSeen` is written by
+Portico's explicit health probe and is only a point-in-time observation. Cloudflare rows are
+explicit metadata; this MCP server neither checks them against Cloudflare nor changes Cloudflare.
 Use `observedAt`, `lastSeen`, source, and notes together, and confirm important changes against
 the live system through the appropriate operator workflow.
 
@@ -326,9 +332,10 @@ per commit, and `X.Y.Z` / `X.Y` when you push a `vX.Y.Z` tag (`git tag v1.0.0 &&
   `cloudflare_routes` (linked from ports), `tags`+`node_tags`, plus `auth` and `api_tokens`. JSON camelCase ↔ DB snake_case in
   `server/lib/mappers.js`. Server-side guards: port uniqueness, parent-cycle prevention,
   IPv4 validation, enum whitelisting, reparent-to-grandparent on node delete.
-- **Seed** (`server/seed.js`) — runs only when the DB is empty, replicating a realistic
-  sample homelab (Proxmox host + guests, docker host + containers, router/AP/IoT, networks,
-  links, and selfh.st icon slugs).
+- **Seed** (`server/seed.js`) — runs only when the DB is empty and inserts a clearly fictional
+  operator demo spanning all node types, hierarchy and typed links, TEST-NET networks/VLANs,
+  inventory ownership/targets, and an explicit `.example` Cloudflare route. It is designed for
+  graph, inventory, API, and MCP exploration without making claims about a live environment.
 
 `prototype/index.html` is the original standalone (localStorage-only) prototype, kept for reference.
 
