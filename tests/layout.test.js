@@ -120,20 +120,22 @@ test('fit camera keeps graph bounds inside banner and hint safe areas at audit v
   const ctx = vm.createContext({ ZOOM_MIN: 0.18, ZOOM_MAX: 3.2 });
   vm.runInContext(extract('graphFitCamera'), ctx);
   ctx.bounds = { left: -500, right: 500, top: -240, bottom: 240 };
-  ctx.viewport = { width: 1280, height: 577 };
   ctx.insets = { top: 72, right: 32, bottom: 54, left: 32 };
-  const camera = vm.runInContext('graphFitCamera(bounds, viewport, insets)', ctx);
-  const project = (x, y) => ({
-    x: (x - camera.position.x) * camera.scale + ctx.viewport.width / 2,
-    y: (y - camera.position.y) * camera.scale + ctx.viewport.height / 2,
-  });
-  const topLeft = project(ctx.bounds.left, ctx.bounds.top);
-  const bottomRight = project(ctx.bounds.right, ctx.bounds.bottom);
-  assert.ok(topLeft.x >= ctx.insets.left);
-  assert.ok(topLeft.y >= ctx.insets.top);
-  assert.ok(bottomRight.x <= ctx.viewport.width - ctx.insets.right);
-  assert.ok(bottomRight.y <= ctx.viewport.height - ctx.insets.bottom);
-  assert.ok((topLeft.y + bottomRight.y) / 2 > ctx.viewport.height / 2, 'asymmetric overlays shift the graph into the safe viewport');
+  for (const viewport of [{ width: 1280, height: 577 }, { width: 1440, height: 900 }]) {
+    ctx.viewport = viewport;
+    const camera = vm.runInContext('graphFitCamera(bounds, viewport, insets)', ctx);
+    const project = (x, y) => ({
+      x: (x - camera.position.x) * camera.scale + viewport.width / 2,
+      y: (y - camera.position.y) * camera.scale + viewport.height / 2,
+    });
+    const topLeft = project(ctx.bounds.left, ctx.bounds.top);
+    const bottomRight = project(ctx.bounds.right, ctx.bounds.bottom);
+    assert.ok(topLeft.x >= ctx.insets.left);
+    assert.ok(topLeft.y >= ctx.insets.top);
+    assert.ok(bottomRight.x <= viewport.width - ctx.insets.right);
+    assert.ok(bottomRight.y <= viewport.height - ctx.insets.bottom);
+    assert.ok((topLeft.y + bottomRight.y) / 2 > viewport.height / 2, 'asymmetric overlays shift the graph into the safe viewport');
+  }
   assert.match(source, /btnFit'\)\.addEventListener\('click', \(\) => fitGraph/);
   assert.doesNotMatch(source, /network\.fit/);
 });
@@ -159,10 +161,49 @@ test('host goto is independent of port domains and LAN ignores stale Cloudflare 
   assert.equal(vm.runInContext("portUrl({ipAddress:'10.0.0.1'}, {status:'in_use', exposureMode:'lan', domain:'stale.example', portNumber:80})", ctx), 'http://10.0.0.1:80');
 });
 test('graph port selection retains port identity and table details offer destination links', () => {
-  const ctx = vm.createContext({ state: { ports: [{id:'a',nodeId:'n'}] }, portGraphId: p => 'port:' + p.id, relatedIds: () => new Set(), syncGraph() {}, openSidebar() {}, network: null, renderDetail() {}, markTableSelection() {}, startFlow() {} });
+  const ctx = vm.createContext({ state: { ports: [{id:'a',nodeId:'n'}] }, portGraphId: p => 'port:' + p.id, relatedIds: () => new Set(), refreshGraphFocus() {}, openSidebar() {}, network: null, renderDetail() {}, markTableSelection() {}, startFlow() {} });
   vm.runInContext(extract('select') + "\nselect('port:a')", ctx);
   assert.equal(ctx.selectedId, 'port:a');
   assert.match(extract('renderTableRows'), /portOpenLink/);
+});
+
+test('network click selection preserves vis entities instead of rebuilding during the click callback', () => {
+  assert.doesNotMatch(extract('select'), /syncGraph\(\)/);
+  assert.match(extract('select'), /refreshGraphFocus\(\)/);
+  const click = source.slice(source.indexOf("network.on('click'"), source.indexOf("network.on('click'") + 420);
+  assert.doesNotMatch(click, /syncGraph\(\)/);
+  assert.match(click, /refreshGraphFocus\(\)/);
+
+  const updates = [], selected = [];
+  const items = new Map([
+    ['n-demo-proxmox', { id: 'n-demo-proxmox', opacity: 1 }],
+    ['n-demo-peer', { id: 'n-demo-peer', opacity: 1 }],
+    ['port:p-demo', { id: 'port:p-demo', opacity: 1 }],
+  ]);
+  const dataSet = {
+    get: id => items.get(id),
+    update: patches => patches.forEach(patch => { updates.push(patch); items.set(patch.id, { ...items.get(patch.id), ...patch }); }),
+  };
+  const ctx = vm.createContext({
+    nodesDS: dataSet, edgesDS: { get: () => null, update() {} },
+    graphNodes: () => [...items.values()].map(item => ({ ...item, opacity: ctx.focusSet && !ctx.focusSet.has(item.id) ? 0.2 : 1 })),
+    buildEdges: () => [], relatedIds: id => new Set([id]),
+    network: { selectNodes: ids => selected.push(...ids), getScale: () => 1 },
+    REDUCE: true, currentView: 'graph', graphAutoFit: true,
+    openSidebar() {}, renderDetail() {}, markTableSelection() {}, startFlow() {},
+  });
+  vm.runInContext(`${extract('refreshGraphFocus')}\n${extract('select')}\nselect('n-demo-proxmox')`, ctx);
+  assert.equal(items.get('n-demo-proxmox').opacity, 1);
+  assert.equal(items.get('n-demo-peer').opacity, 0.2);
+  assert.deepEqual(selected, ['n-demo-proxmox']);
+  assert.ok(updates.length, 'the click path updates focus styling in place');
+
+  vm.runInContext('selectedId = null; focusSet = null; refreshGraphFocus()', ctx);
+  assert.equal(items.get('n-demo-peer').opacity, 1, 'blank-background deselect restores focus styling');
+  vm.runInContext("select('port:p-demo')", ctx);
+  assert.equal(items.get('port:p-demo').opacity, 1);
+  assert.equal(items.get('n-demo-proxmox').opacity, 0.2);
+  assert.equal(selected.at(-1), 'port:p-demo');
 });
 
 test('empty table port details render the no-ports message once', () => {
@@ -242,6 +283,27 @@ test('render and dragging resolve visible mixed collisions as drafts without cha
   assert.equal(h.context.state.ports[1].posX, undefined);
   assert.equal(h.writes.length, 0);
   assert.equal(h.saveButton.hidden, true);
+});
+test('afterDrawing overlap updates do not re-enter while vis is applying the first update', () => {
+  const h = harness();
+  h.context.drawFlow = () => {};
+  h.run(`
+    var points = { n: { x: 0, y: 0 }, 'port:a': { x: 0, y: 0 } };
+    var overlapUpdateCalls = 0;
+    nodesDS.getIds = () => Object.keys(points);
+    nodesDS.update = updates => {
+      overlapUpdateCalls += 1;
+      if (overlapUpdateCalls > 4) throw new Error('reentrant overlap update');
+      handlersAfterDrawing();
+      updates.forEach(p => { points[p.id] = { x: p.x, y: p.y }; });
+    };
+    network.getPositions = () => points;
+    network.getBoundingBox = id => ({ left: points[id].x - 50, right: points[id].x + 50, top: points[id].y - 30, bottom: points[id].y + 30 });
+  `);
+  h.context.handlersAfterDrawing = h.handlers.afterDrawing;
+  h.handlers.afterDrawing();
+  assert.equal(h.context.overlapUpdateCalls, 1);
+  assert.ok(Math.abs(h.context.points['port:a'].x) >= 112 || Math.abs(h.context.points['port:a'].y) >= 72);
 });
 test('port details expose destination and preserve owner, parent, target and state', () => {
   const nodes = [{id:'owner',name:'Host',ipAddress:'10.0.0.1',parentId:'parent'}, {id:'parent',name:'Parent'}, {id:'target',name:'Target'}];

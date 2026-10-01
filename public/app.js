@@ -592,23 +592,30 @@ function separateGraphBoxes(boxes, moving = []) {
   return placed;
 }
 function resolveGraphOverlaps(moving = []) {
-  const ids = nodesDS.getIds();
-  const positions = network.getPositions(ids);
-  const boxes = ids.map(id => {
-    const point = positions[id], bounds = network.getBoundingBox(id);
-    if (!point || !bounds || ![point.x, point.y, bounds.left, bounds.right, bounds.top, bounds.bottom].every(Number.isFinite)) return null;
-    return { id, x: point.x, y: point.y, left: bounds.left - point.x, right: bounds.right - point.x, top: bounds.top - point.y, bottom: bounds.bottom - point.y };
-  }).filter(Boolean);
-  const updates = [];
-  for (const box of separateGraphBoxes(boxes, moving)) {
-    const point = positions[box.id];
-    if (point.x === box.x && point.y === box.y) continue;
-    const item = String(box.id).startsWith('port:') ? state.ports.find(p => portGraphId(p) === box.id) : nodeById(box.id);
-    if (!item) continue;
-    item.posX = box.x; item.posY = box.y;
-    updates.push({ id: box.id, x: box.x, y: box.y });
+  // vis can redraw synchronously before a DataSet position update is observable.
+  if (resolveGraphOverlaps.active) return;
+  resolveGraphOverlaps.active = true;
+  try {
+    const ids = nodesDS.getIds();
+    const positions = network.getPositions(ids);
+    const boxes = ids.map(id => {
+      const point = positions[id], bounds = network.getBoundingBox(id);
+      if (!point || !bounds || ![point.x, point.y, bounds.left, bounds.right, bounds.top, bounds.bottom].every(Number.isFinite)) return null;
+      return { id, x: point.x, y: point.y, left: bounds.left - point.x, right: bounds.right - point.x, top: bounds.top - point.y, bottom: bounds.bottom - point.y };
+    }).filter(Boolean);
+    const updates = [];
+    for (const box of separateGraphBoxes(boxes, moving)) {
+      const point = positions[box.id];
+      if (point.x === box.x && point.y === box.y) continue;
+      const item = String(box.id).startsWith('port:') ? state.ports.find(p => portGraphId(p) === box.id) : nodeById(box.id);
+      if (!item) continue;
+      item.posX = box.x; item.posY = box.y;
+      updates.push({ id: box.id, x: box.x, y: box.y });
+    }
+    if (updates.length) { markLayoutDirty(); nodesDS.update(updates); }
+  } finally {
+    resolveGraphOverlaps.active = false;
   }
-  if (updates.length) { markLayoutDirty(); nodesDS.update(updates); }
 }
 
 function buildGraph() {
@@ -628,7 +635,7 @@ function buildGraph() {
   network.on('dragStart', (params) => { if (!params.nodes.length) graphAutoFit = false; });
   network.on('click', (params) => {
     if (params.nodes.length) select(params.nodes[0]);
-    else { selectedId = null; focusSet = null; network.unselectAll(); syncGraph(); closeSidebar(); renderDetail(); markTableSelection(); }
+    else { selectedId = null; focusSet = null; network.unselectAll(); refreshGraphFocus(); closeSidebar(); renderDetail(); markTableSelection(); }
   });
   network.on('dragEnd', (params) => {
     if (!params.nodes.length) return;
@@ -832,6 +839,22 @@ function syncGraph() {
   if (selectedId && nodesDS.get(selectedId)) network.selectNodes([selectedId]);
 }
 
+/* Selection happens inside vis-network's click dispatch. Rebuilding the data
+   sets there invalidates entities still in that render cycle, so only refresh
+   focus-dependent fields and preserve the existing vis entities. */
+function refreshGraphFocus() {
+  if (!nodesDS || !edgesDS) return;
+  const nodeUpdates = graphNodes()
+    .filter(item => nodesDS.get(item.id))
+    .map(item => ({ id: item.id, opacity: item.opacity ?? 1 }));
+  const edgeUpdates = buildEdges()
+    .filter(item => edgesDS.get(item.id))
+    .map(item => ({ id: item.id, color: item.color }));
+  if (nodeUpdates.length) nodesDS.update(nodeUpdates);
+  if (edgeUpdates.length) edgesDS.update(edgeUpdates);
+  if (selectedId && nodesDS.get(selectedId)) network.selectNodes([selectedId]);
+}
+
 function refreshGraphNode(id) {
   const n = state.nodes.find(x => x.id === id);
   if (n && nodesDS && nodesDS.get(id)) nodesDS.update(nodeVis(n));
@@ -873,7 +896,7 @@ function rgba(hex, a){ const [r,g,b]=hx(hex); return `rgba(${r},${g},${b},${a})`
 function select(id) {
   selectedId = id;
   focusSet = relatedIds(id);
-  syncGraph();
+  refreshGraphFocus();
   openSidebar();
   if (network && !REDUCE && currentView !== 'table') {
     graphAutoFit = false;
@@ -883,7 +906,7 @@ function select(id) {
   markTableSelection();
   startFlow();
 }
-function clearFocus() { if (focusSet) { focusSet = null; syncGraph(); } }
+function clearFocus() { if (focusSet) { focusSet = null; refreshGraphFocus(); } }
 
 const mainEl = document.querySelector('.main');
 function openSidebar() { mainEl.classList.add('sidebar-open'); updateReopen(); reflowGraph(); }
